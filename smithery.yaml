@@ -4,9 +4,8 @@ description: Email-like messaging for AI agents across different projects
 
 # Smithery deployment configuration
 deploy:
-  type: http
-  port: 3000
-  healthCheck: /health
+  type: mcp
+  transport: stdio
 
 # Session configuration schema for Smithery
 configSchema:
@@ -47,15 +46,12 @@ capabilities:
 # Transport configuration
 transport:
   type: stdio
-  fallback:
-    type: http
-    port: 3000
 
-# Health check endpoint
-healthCheck:
-  path: /health
-  method: GET
-  expectedStatus: 200
+# MCP server information
+mcp:
+  name: communication-server
+  version: 2.0.0
+  description: Email-like messaging for AI agents across different projects
 
 # Documentation
 documentation:

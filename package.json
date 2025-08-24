@@ -15,7 +15,11 @@
     "smithery:deploy": "npx @smithery/cli deploy",
     "smithery:dev": "npx @smithery/cli dev",
     "postinstall": "node scripts/postinstall.js",
-    "setup": "node scripts/setup.js"
+    "setup": "node scripts/setup.js",
+    "debug": "node dist/index.js",
+    "test-mcp": "echo '{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2024-11-05\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"test\", \"version\": \"1.0.0\"}}}' | node dist/index.js",
+    "test-tools": "echo '{\"jsonrpc\": \"2.0\", \"id\": 2, \"method\": \"tools/list\", \"params\": {}}' | node dist/index.js",
+    "clean": "rm -rf dist && rm -rf node_modules && npm install"
   },
   "keywords": [
     "mcp",
