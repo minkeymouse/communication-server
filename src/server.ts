@@ -528,7 +528,34 @@ export class CommunicationServer {
     }
 
     const senderWorkspace = this.resolveWorkspacePath(from_path);
-    const sender = await this.getOrCreateAgent(senderWorkspace);
+    
+    // Try to find existing agents in this workspace first
+    const existingAgents = this.db.getAgentsByWorkspace(senderWorkspace);
+    let sender: Agent;
+    
+    console.log('🔍 Debug: Found', existingAgents.length, 'agents in workspace:', senderWorkspace);
+    existingAgents.forEach(agent => {
+      console.log('  - Agent:', agent.id, agent.name, agent.role);
+    });
+    
+    if (existingAgents.length > 0) {
+      // Use the first existing agent (preferably the main one)
+      const mainAgent = existingAgents.find(agent => 
+        agent.name === 'Communication Server Agent'
+      ) || existingAgents.find(agent => 
+        agent.role === 'coordinator'
+      ) || existingAgents.find(agent => 
+        agent.name === 'Default Agent'
+      ) || existingAgents[0];
+      
+      sender = mainAgent;
+      console.log('✅ Using existing agent:', sender.id, sender.name);
+      this.db.updateAgentLastSeen(sender.id);
+    } else {
+      // Create new agent if none exist
+      sender = await this.getOrCreateAgent(senderWorkspace);
+      console.log('🆕 Created new agent:', sender.id, sender.name);
+    }
     
     const messages = this.db.getMessagesForAgent(sender.id, limit);
     const allMessages = this.db.getMessagesForAgent(sender.id, 10000);
