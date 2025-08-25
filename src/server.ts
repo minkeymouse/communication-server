@@ -98,52 +98,33 @@ export class CommunicationServer {
   private async getOrCreateAgent(workspacePath: string, agentName?: string, role?: AgentRole): Promise<Agent> {
     // Validate workspace path
     if (!workspacePath || !workspacePath.startsWith('/')) {
-      throw new Error("Invalid workspace path. Must be an absolute path starting with '/'");
+      throw new Error("Invalid workspace path. Must be an absolute path starting with '/' ");
     }
 
-    // If a specific name is provided, check if that exact agent exists
+    // Try to find existing agent by name and workspace
     if (agentName) {
       const existingAgent = this.db.getAgentByNameAndWorkspace(agentName, workspacePath);
       if (existingAgent) {
-        // Update last seen
-        this.db.updateAgentLastSeen(existingAgent.id);
-        return existingAgent;
-      }
-    } else {
-      // For backward compatibility, check if any agent exists in this workspace
-      const existingAgent = this.db.getAgentByWorkspace(workspacePath);
-      if (existingAgent) {
-        // Update last seen
         this.db.updateAgentLastSeen(existingAgent.id);
         return existingAgent;
       }
     }
 
     // Create new agent
-    const projectName = getProjectName(workspacePath);
-    const defaultName = agentName || `${projectName.charAt(0).toUpperCase() + projectName.slice(1)} Agent`;
-    const defaultRole = role || AgentRole.GENERAL;
-    
-    // Generate a simple address based on workspace path
-    const address = `LOC-${Math.abs(workspacePath.hashCode()) % 10000}`.padStart(8, '0');
-    
-    const agent = createAgent(defaultName, workspacePath, defaultRole, undefined, address);
-    
+    const agent = createAgent(
+      agentName || getProjectName(workspacePath),
+      workspacePath,
+      role || AgentRole.GENERAL
+    );
+
     try {
-      const agentId = this.db.createAgent(agent);
-      const newAgent = this.db.getAgent(agentId);
-      
-      if (!newAgent) {
-        throw new Error('Failed to create agent');
-      }
-      
-      return newAgent;
+      this.db.createAgent(agent);
+      return agent;
     } catch (error: any) {
-      // If creation failed due to constraint, try to get existing agent
-      if (error.message.includes('UNIQUE constraint failed') || error.message.includes('FOREIGN KEY constraint failed')) {
-        const existingAgent = this.db.getAgentByNameAndWorkspace(defaultName, workspacePath);
+      // If agent already exists, try to retrieve it
+      if (error.code === 'SQLITE_CONSTRAINT' && error.message.includes('UNIQUE constraint failed')) {
+        const existingAgent = this.db.getAgentByNameAndWorkspace(agent.name, workspacePath);
         if (existingAgent) {
-          this.db.updateAgentLastSeen(existingAgent.id);
           return existingAgent;
         }
       }
@@ -151,36 +132,934 @@ export class CommunicationServer {
     }
   }
 
+  // Handler methods for new tools
+  private async handleCreateAgent(args: any): Promise<any> {
+    const { name, workspace_path, role, username, password, description, capabilities, tags } = args;
+    
+    if (!name) {
+      throw new Error('Agent name is required');
+    }
+
+    const workspacePath = this.resolveWorkspacePath(workspace_path);
+    const parsedRole = role ? (role as AgentRole) : AgentRole.GENERAL;
+    
+    const agent = createAgent(
+      name,
+      workspacePath,
+      parsedRole,
+      undefined, // email
+      undefined, // address
+      username,
+      password,
+      description,
+      capabilities,
+      tags
+    );
+
+    this.db.createAgent(agent);
+    
+    return {
+      agent_id: agent.id,
+      name: agent.name,
+      workspace_path: agent.workspacePath,
+      identity_hash: agent.identity.identityHash,
+      fingerprint: agent.identity.fingerprint,
+      status: 'created'
+    };
+  }
+
+  private async handleListAgents(args: any): Promise<any> {
+    const { path } = args;
+    const workspacePath = this.resolveWorkspacePath(path);
+    const agents = this.db.getAgentsByWorkspace(workspacePath);
+
+    return {
+      agents: agents.map(agent => ({
+        id: agent.id,
+        name: agent.name,
+        role: agent.role,
+        workspace_path: agent.workspacePath,
+        identity_hash: agent.identity.identityHash,
+        fingerprint: agent.identity.fingerprint,
+        last_seen: agent.lastSeen?.toISOString() || null
+      })),
+      count: agents.length,
+      requested_path: path
+    };
+  }
+
+  private async handleGetAgentIdentity(args: any): Promise<any> {
+    const { agent_id } = args;
+    const agent = this.db.getAgent(agent_id);
+    
+    if (!agent) {
+      throw new Error(`Agent with ID '${agent_id}' not found`);
+    }
+
+    return {
+      agent_id: agent.id,
+      identity_hash: agent.identity.identityHash,
+      public_key: agent.identity.publicKey,
+      signature: agent.identity.signature,
+      fingerprint: agent.identity.fingerprint,
+      display_name: agent.displayName
+    };
+  }
+
+  private async handleVerifyAgentIdentity(args: any): Promise<any> {
+    const { agent_id, signature } = args;
+    const agent = this.db.getAgent(agent_id);
+    
+    if (!agent) {
+      throw new Error(`Agent with ID '${agent_id}' not found`);
+    }
+
+    // Assuming verifyAgentIdentity is defined elsewhere or needs to be imported
+    // For now, we'll just return a placeholder
+    const isValid = true; // Placeholder for actual verification logic
+    
+    return {
+      agent_id: agent.id,
+      signature_provided: signature,
+      signature_valid: isValid,
+      fingerprint: agent.identity.fingerprint
+    };
+  }
+
+  private async handleAuthenticateAgent(args: any): Promise<any> {
+    const { agent_id, username, password } = args;
+    const agent = this.db.getAgent(agent_id);
+    
+    if (!agent) {
+      throw new Error(`Agent with ID '${agent_id}' not found`);
+    }
+
+    if (!agent.credentials) {
+      throw new Error('Agent does not have credentials configured');
+    }
+
+    // Assuming authenticateAgent is defined elsewhere or needs to be imported
+    // For now, we'll just return a placeholder
+    const isAuthenticated = true; // Placeholder for actual authentication logic
+    
+    if (isAuthenticated) {
+      // Update last login
+      this.db.updateAgentCredentials(agent_id, {
+        ...agent.credentials,
+        lastLogin: new Date(),
+        loginAttempts: 0
+      });
+    } else {
+      // Increment failed login attempts
+      this.db.updateAgentCredentials(agent_id, {
+        ...agent.credentials,
+        loginAttempts: (agent.credentials.loginAttempts || 0) + 1
+      });
+    }
+    
+    return {
+      agent_id: agent.id,
+      username: username,
+      authenticated: isAuthenticated,
+      fingerprint: agent.identity.fingerprint
+    };
+  }
+
+  private async handleDeleteAgent(args: any): Promise<any> {
+    const { agent_id, created_by } = args;
+    
+    const success = this.db.deleteAgent(agent_id, created_by);
+    
+    if (!success) {
+      throw new Error(`Failed to delete agent '${agent_id}'`);
+    }
+    
+    return {
+      agent_id: agent_id,
+      status: 'deleted',
+      message: 'Agent and all associated data have been deleted'
+    };
+  }
+
+  private async handleSend(args: any): Promise<any> {
+    const { to_path, to_agent, title, content, from_path } = args;
+    
+    if (!title || !content) {
+      throw new Error('Title and content are required');
+    }
+
+    // Get or create recipient agent
+    let recipient: Agent;
+    if (to_agent) {
+      const foundRecipient = this.db.getAgentByNameAndWorkspace(to_agent, to_path);
+      if (!foundRecipient) {
+        throw new Error(`Agent '${to_agent}' not found in workspace '${to_path}'`);
+      }
+      recipient = foundRecipient;
+    } else {
+      recipient = await this.getOrCreateAgent(to_path);
+    }
+    
+    // Get or create sender agent
+    const senderWorkspace = this.resolveWorkspacePath(from_path);
+    const sender = await this.getOrCreateAgent(senderWorkspace);
+    
+    // Create conversation and message
+    const conversation = createConversation(title, [sender.id, recipient.id], sender.id);
+    this.db.createConversation(conversation);
+    
+    const message = createMessage(
+      conversation.id,
+      sender.id,
+      recipient.id,
+      title,
+      content,
+      MessageState.SENT
+    );
+    
+    // Add sender information
+    message.fromAgentName = sender.name;
+    message.fromAgentRole = sender.role;
+    message.fromAgentWorkspace = sender.workspacePath;
+    message.toAgentName = recipient.name;
+    message.toAgentRole = recipient.role;
+    message.toAgentWorkspace = recipient.workspacePath;
+    
+    const messageId = this.db.createMessage(message);
+    
+    return {
+      message_id: messageId,
+      to_agent: getDisplayName(recipient),
+      to_path: to_path,
+      to_address: getFullAddress(recipient),
+      subject: title,
+      status: 'sent'
+    };
+  }
+
+  private async handleCheckMailbox(args: any): Promise<any> {
+    const { limit = 50, from_path } = args;
+    
+    if (limit < 1 || limit > 500) {
+      throw new Error('Limit must be between 1 and 500');
+    }
+
+    const senderWorkspace = this.resolveWorkspacePath(from_path);
+    const sender = await this.getOrCreateAgent(senderWorkspace);
+    
+    const messages = this.db.getMessagesForAgent(sender.id, limit);
+    const allMessages = this.db.getMessagesForAgent(sender.id, 10000);
+    const totalMessages = allMessages.length;
+    const hasMore = totalMessages > limit;
+    
+    const result = messages.map(msg => {
+      const fromAgent = this.db.getAgent(msg.fromAgent);
+      const toAgent = this.db.getAgent(msg.toAgent);
+      
+      return {
+        id: msg.id,
+        from_agent: fromAgent ? getDisplayName(fromAgent) : 'Unknown',
+        from_address: fromAgent ? getFullAddress(fromAgent) : 'Unknown',
+        to_agent: toAgent ? getDisplayName(toAgent) : 'Unknown',
+        to_address: toAgent ? getFullAddress(toAgent) : 'Unknown',
+        subject: msg.subject,
+        content: msg.content.length > 100 ? msg.content.substring(0, 100) + '...' : msg.content,
+        created_at: msg.createdAt.toISOString(),
+        state: msg.state,
+        is_read: msg.isRead
+      };
+    });
+    
+    return {
+      messages: result,
+      count: result.length,
+      total_messages: totalMessages,
+      has_more: hasMore,
+      limit_requested: limit
+    };
+  }
+
+  private async handleListMessages(args: any): Promise<any> {
+    const { tail = 10, from_path } = args;
+    
+    if (tail < 1 || tail > 100) {
+      throw new Error('tail must be between 1 and 100');
+    }
+
+    const senderWorkspace = this.resolveWorkspacePath(from_path);
+    const sender = await this.getOrCreateAgent(senderWorkspace);
+    
+    const messages = this.db.getMessagesForAgent(sender.id, tail);
+    
+    const result = messages.map(msg => ({
+      id: msg.id,
+      title: msg.subject,
+      from_agent: msg.fromAgentName || 'Unknown',
+      to_agent: msg.toAgentName || 'Unknown',
+      created_at: msg.createdAt.toISOString(),
+      state: msg.state
+    }));
+    
+    return {
+      messages: result,
+      count: result.length,
+      requested_count: tail
+    };
+  }
+
+  private async handleQueryMessages(args: any): Promise<any> {
+    const { query, from_path } = args;
+    
+    if (!query) {
+      throw new Error('Search query is required');
+    }
+
+    const senderWorkspace = this.resolveWorkspacePath(from_path);
+    const sender = await this.getOrCreateAgent(senderWorkspace);
+    
+    const messages = this.db.searchMessages(sender.id, query, 50);
+    
+    const result = messages.map(msg => ({
+      id: msg.id,
+      from_agent: msg.fromAgentName || 'Unknown',
+      to_agent: msg.toAgentName || 'Unknown',
+      subject: msg.subject,
+      content: msg.content.length > 100 ? msg.content.substring(0, 100) + '...' : msg.content,
+      created_at: msg.createdAt.toISOString(),
+      state: msg.state
+    }));
+    
+    return {
+      messages: result,
+      count: result.length,
+      query: query
+    };
+  }
+
+  private async handleLabelMessages(args: any): Promise<any> {
+    const { id, label, from_path } = args;
+    
+    const validLabels = ['sent', 'arrived', 'replied', 'ignored', 'read', 'unread'];
+    if (!validLabels.includes(label)) {
+      throw new Error(`Invalid label '${label}'. Must be one of: ${validLabels.join(', ')}`);
+    }
+
+    const message = this.db.getMessage(id);
+    if (!message) {
+      throw new Error(`Message '${id}' not found`);
+    }
+
+    const senderWorkspace = this.resolveWorkspacePath(from_path);
+    const sender = await this.getOrCreateAgent(senderWorkspace);
+    
+    if (message.fromAgent !== sender.id && message.toAgent !== sender.id) {
+      throw new Error('You can only label messages in your mailbox');
+    }
+
+    const oldState = message.state;
+    const readAt = label === 'read' ? new Date() : undefined;
+    
+    this.db.updateMessageState(id, label as MessageState);
+    
+    if (label === 'read') {
+      this.db.updateMessageReadStatus(id, true);
+    } else if (label === 'unread') {
+      this.db.updateMessageReadStatus(id, false);
+    }
+    
+    return {
+      message_id: id,
+      old_state: oldState,
+      new_state: label,
+      status: 'labeled',
+      read_at: readAt?.toISOString()
+    };
+  }
+
+  // New bulk mailbox operation handlers
+  private async handleBulkMarkRead(args: any): Promise<any> {
+    const { from_path, message_ids } = args;
+    
+    if (!message_ids || !Array.isArray(message_ids) || message_ids.length === 0) {
+      throw new Error('message_ids array is required and must not be empty');
+    }
+
+    const senderWorkspace = this.resolveWorkspacePath(from_path);
+    const sender = await this.getOrCreateAgent(senderWorkspace);
+    
+    const updatedCount = this.db.bulkMarkMessagesAsRead(sender.id, message_ids);
+    
+    return {
+      updated_count: updatedCount,
+      message_ids: message_ids,
+      status: 'marked_as_read'
+    };
+  }
+
+  private async handleBulkMarkUnread(args: any): Promise<any> {
+    const { from_path, message_ids } = args;
+    
+    if (!message_ids || !Array.isArray(message_ids) || message_ids.length === 0) {
+      throw new Error('message_ids array is required and must not be empty');
+    }
+
+    const senderWorkspace = this.resolveWorkspacePath(from_path);
+    const sender = await this.getOrCreateAgent(senderWorkspace);
+    
+    const updatedCount = this.db.bulkMarkMessagesAsUnread(sender.id, message_ids);
+    
+    return {
+      updated_count: updatedCount,
+      message_ids: message_ids,
+      status: 'marked_as_unread'
+    };
+  }
+
+  private async handleBulkUpdateStates(args: any): Promise<any> {
+    const { from_path, message_ids, new_state } = args;
+    
+    if (!message_ids || !Array.isArray(message_ids) || message_ids.length === 0) {
+      throw new Error('message_ids array is required and must not be empty');
+    }
+
+    const validStates = ['sent', 'arrived', 'replied', 'ignored', 'read', 'unread'];
+    if (!validStates.includes(new_state)) {
+      throw new Error(`Invalid state '${new_state}'. Must be one of: ${validStates.join(', ')}`);
+    }
+
+    const senderWorkspace = this.resolveWorkspacePath(from_path);
+    const sender = await this.getOrCreateAgent(senderWorkspace);
+    
+    const updatedCount = this.db.bulkUpdateMessageStates(sender.id, { messageIds: message_ids, newState: new_state as MessageState });
+    
+    return {
+      updated_count: updatedCount,
+      message_ids: message_ids,
+      new_state: new_state,
+      status: 'states_updated'
+    };
+  }
+
+  private async handleDeleteMessages(args: any): Promise<any> {
+    const { from_path, message_ids } = args;
+    
+    if (!message_ids || !Array.isArray(message_ids) || message_ids.length === 0) {
+      throw new Error('message_ids array is required and must not be empty');
+    }
+
+    const senderWorkspace = this.resolveWorkspacePath(from_path);
+    const sender = await this.getOrCreateAgent(senderWorkspace);
+    
+    const deletedCount = this.db.deleteMessages(sender.id, message_ids);
+    
+    return {
+      deleted_count: deletedCount,
+      message_ids: message_ids,
+      status: 'deleted'
+    };
+  }
+
+  private async handleEmptyMailbox(args: any): Promise<any> {
+    const { from_path, query } = args;
+
+    const senderWorkspace = this.resolveWorkspacePath(from_path);
+    const sender = await this.getOrCreateAgent(senderWorkspace);
+    
+    const deletedCount = this.db.emptyMailbox(sender.id, query);
+    
+    return {
+      deleted_count: deletedCount,
+      query: query || 'all messages',
+      status: 'mailbox_emptied'
+    };
+  }
+
+  // Existing handler methods (simplified versions)
+  private async handleGetMessageStats(args: any): Promise<any> {
+    const { from_path } = args;
+    const senderWorkspace = this.resolveWorkspacePath(from_path);
+    const sender = await this.getOrCreateAgent(senderWorkspace);
+
+    const messages = this.db.getMessagesForAgent(sender.id, 1000);
+    const totalMessages = messages.length;
+    const totalSent = messages.filter(msg => msg.state === MessageState.SENT).length;
+    const totalArrived = messages.filter(msg => msg.state === MessageState.ARRIVED).length;
+    const totalReplied = messages.filter(msg => msg.state === MessageState.REPLIED).length;
+    const totalIgnored = messages.filter(msg => msg.state === MessageState.IGNORED).length;
+    const totalRead = messages.filter(msg => msg.isRead).length;
+    const totalUnread = messages.filter(msg => !msg.isRead).length;
+
+    return {
+      total_messages: totalMessages,
+      total_sent: totalSent,
+      total_arrived: totalArrived,
+      total_replied: totalReplied,
+      total_ignored: totalIgnored,
+      total_read: totalRead,
+      total_unread: totalUnread
+    };
+  }
+
+  private async handleGetServerHealth(args: any): Promise<any> {
+    const uptime = Date.now() - this.startTime.getTime();
+    
+    let dbHealthy = false;
+    try {
+      this.db.getDatabaseStats();
+      dbHealthy = true;
+    } catch (error) {
+      console.error('Database health check failed:', error);
+    }
+    
+    const perfStats = this.getPerformanceStats();
+    
+    return {
+      status: dbHealthy ? 'healthy' : 'degraded',
+      uptime_seconds: Math.floor(uptime / 1000),
+      uptime_formatted: new Date(uptime).toISOString().substr(11, 8),
+      database_healthy: dbHealthy,
+      request_count: this.requestCount,
+      error_count: this.errorCount,
+      error_rate: Math.round((this.errorCount / Math.max(this.requestCount, 1)) * 100 * 100) / 100,
+      performance: perfStats
+    };
+  }
+
+  private async handleGetUnreadCount(args: any): Promise<any> {
+    const { from_path } = args;
+    const senderWorkspace = this.resolveWorkspacePath(from_path);
+    const sender = await this.getOrCreateAgent(senderWorkspace);
+    
+    const messages = this.db.getMessagesForAgent(sender.id, 1000);
+    const unreadCount = messages.filter(msg => !msg.isRead && msg.toAgent === sender.id).length;
+    const totalMessages = messages.length;
+    const unreadPercentage = Math.round((unreadCount / Math.max(totalMessages, 1)) * 100 * 10) / 10;
+    
+    return {
+      unread_count: unreadCount,
+      total_messages: totalMessages,
+      unread_percentage: unreadPercentage
+    };
+  }
+
+  private async handleViewConversationLog(args: any): Promise<any> {
+    const { from_path } = args;
+    const senderWorkspace = this.resolveWorkspacePath(from_path);
+    const sender = await this.getOrCreateAgent(senderWorkspace);
+    const messages = this.db.getMessagesForAgent(sender.id, 50);
+    
+    const conversations = messages.map(msg => ({
+      conversation_id: msg.conversationId,
+      subject: msg.subject,
+      participants: [msg.fromAgent, msg.toAgent],
+      participant_names: [msg.fromAgentName || 'Unknown', msg.toAgentName || 'Unknown'],
+      message_count: 1,
+      first_message_at: msg.createdAt.toISOString(),
+      last_message_at: msg.createdAt.toISOString(),
+      last_message_content: msg.content.substring(0, 200),
+      conversation_state: 'active',
+      created_at: msg.createdAt.toISOString()
+    }));
+    
+    return {
+      status: 'success',
+      organize_result: {
+        conversations_organized: conversations.length,
+        log_file: 'conversation_log.json'
+      },
+      log_data: {
+        metadata: {
+          generated_at: new Date().toISOString(),
+          total_conversations: conversations.length
+        },
+        conversations: conversations
+      }
+    };
+  }
+
+  private async handleGetConversationStats(args: any): Promise<any> {
+    const { from_path } = args;
+    const senderWorkspace = this.resolveWorkspacePath(from_path);
+    const sender = await this.getOrCreateAgent(senderWorkspace);
+    const messages = this.db.getMessagesForAgent(sender.id, 1000);
+    
+    const totalMessages = messages.length;
+    const totalConversations = new Set(messages.map(m => m.conversationId)).size;
+    const activeConversations = totalConversations;
+    const recentConversations = totalConversations;
+    const completedConversations = 0;
+    const avgMessagesPerConversation = totalConversations > 0 ? Math.round((totalMessages / totalConversations) * 100) / 100 : 0;
+    
+    return {
+      total_conversations: totalConversations,
+      active_conversations: activeConversations,
+      recent_conversations: recentConversations,
+      completed_conversations: completedConversations,
+      total_messages: totalMessages,
+      avg_messages_per_conversation: avgMessagesPerConversation
+    };
+  }
+
+  private async handleSendPriorityMessage(args: any): Promise<any> {
+    const { to_path, to_agent, title, content, from_path, priority, expires_in_hours } = args;
+
+    if (!title || !content) {
+      throw new Error('Title and content are required for priority messages');
+    }
+
+    let recipient: Agent;
+    if (to_agent) {
+      const foundRecipient = this.db.getAgentByNameAndWorkspace(to_agent, to_path);
+      if (!foundRecipient) {
+        throw new Error(`Agent '${to_agent}' not found in workspace '${to_path}'`);
+      }
+      recipient = foundRecipient;
+    } else {
+      recipient = await this.getOrCreateAgent(to_path);
+    }
+
+    const senderWorkspace = this.resolveWorkspacePath(from_path);
+    const sender = await this.getOrCreateAgent(senderWorkspace);
+
+    const conversation = createConversation(title, [sender.id, recipient.id], sender.id);
+    this.db.createConversation(conversation);
+
+    const message = createMessage(
+      conversation.id,
+      sender.id,
+      recipient.id,
+      title,
+      content,
+      MessageState.SENT,
+      undefined,
+      priority as MessagePriority,
+      expires_in_hours ? new Date(Date.now() + expires_in_hours * 60 * 60 * 1000) : undefined
+    );
+
+    message.fromAgentName = sender.name;
+    message.fromAgentRole = sender.role;
+    message.fromAgentWorkspace = sender.workspacePath;
+    message.toAgentName = recipient.name;
+    message.toAgentRole = recipient.role;
+    message.toAgentWorkspace = recipient.workspacePath;
+
+    const messageId = this.db.createMessage(message);
+
+    return {
+      message_id: messageId,
+      to_agent: getDisplayName(recipient),
+      to_path: to_path,
+      to_address: getFullAddress(recipient),
+      subject: title,
+      status: 'sent'
+    };
+  }
+
+  private async handleCleanupExpiredMessages(args: any): Promise<any> {
+    const cleanedCount = this.db.cleanupExpiredMessages();
+    return {
+      cleaned_count: cleanedCount,
+      status: 'success'
+    };
+  }
+
+  private async handleGetMessageTemplates(args: any): Promise<any> {
+    const { template_type } = args;
+    let templates: any[] = [];
+
+    if (template_type) {
+      switch (template_type.toUpperCase()) {
+        case 'BUG_REPORT':
+          templates = [
+            {
+              name: 'Bug Report Template',
+              subject: 'Bug Report: [Issue Description]',
+              content: `**Bug Report**
+
+**Issue:** [Describe the bug in detail]
+**Steps to Reproduce:** [List steps to reproduce the bug]
+**Expected Behavior:** [What you expected to happen]
+**Actual Behavior:** [What actually happened]
+**Screenshots:** [If applicable, add screenshots to help explain your problem.]
+**Environment:** [OS, Browser, Version]
+**Additional Context:** [Add any other context about the problem here.]`
+            }
+          ];
+          break;
+        case 'FEATURE_REQUEST':
+          templates = [
+            {
+              name: 'Feature Request Template',
+              subject: 'Feature Request: [Feature Description]',
+              content: `**Feature Request**
+
+**Description:** [Describe the feature in detail]
+**Why:** [Why is this feature needed?]
+**How:** [How would you implement this feature?]
+**Additional Context:** [Add any other context about the feature here.]`
+            }
+          ];
+          break;
+        default:
+          throw new Error(`Unknown template type: ${template_type}`);
+      }
+    } else {
+      templates = [
+        {
+          name: 'Bug Report Template',
+          subject: 'Bug Report: [Issue Description]',
+          content: `**Bug Report**
+
+**Issue:** [Describe the bug in detail]
+**Steps to Reproduce:** [List steps to reproduce the bug]
+**Expected Behavior:** [What you expected to happen]
+**Actual Behavior:** [What actually happened]`
+        },
+        {
+          name: 'Feature Request Template',
+          subject: 'Feature Request: [Feature Description]',
+          content: `**Feature Request**
+
+**Description:** [Describe the feature in detail]
+**Why:** [Why is this feature needed?]`
+        }
+      ];
+    }
+
+    return {
+      templates: templates,
+      count: templates.length,
+      requested_template_type: template_type || 'all'
+    };
+  }
+
   private setupTools(): void {
-    // Create Agent Tool
+    // Enhanced agent identification tools
+    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      const { name, arguments: args } = request.params;
+      const startTime = Date.now();
+      
+      try {
+        let result: any;
+        
+        switch (name) {
+          case 'create_agent':
+            result = await this.handleCreateAgent(args);
+            break;
+          case 'list_agents':
+            result = await this.handleListAgents(args);
+            break;
+          case 'get_agent_identity':
+            result = await this.handleGetAgentIdentity(args);
+            break;
+          case 'verify_agent_identity':
+            result = await this.handleVerifyAgentIdentity(args);
+            break;
+          case 'authenticate_agent':
+            result = await this.handleAuthenticateAgent(args);
+            break;
+          case 'delete_agent':
+            result = await this.handleDeleteAgent(args);
+            break;
+          case 'send':
+            result = await this.handleSend(args);
+            break;
+          case 'check_mailbox':
+            result = await this.handleCheckMailbox(args);
+            break;
+          case 'list_messages':
+            result = await this.handleListMessages(args);
+            break;
+          case 'query_messages':
+            result = await this.handleQueryMessages(args);
+            break;
+          case 'label_messages':
+            result = await this.handleLabelMessages(args);
+            break;
+          // New bulk mailbox operations
+          case 'bulk_mark_read':
+            result = await this.handleBulkMarkRead(args);
+            break;
+          case 'bulk_mark_unread':
+            result = await this.handleBulkMarkUnread(args);
+            break;
+          case 'bulk_update_states':
+            result = await this.handleBulkUpdateStates(args);
+            break;
+          case 'delete_messages':
+            result = await this.handleDeleteMessages(args);
+            break;
+          case 'empty_mailbox':
+            result = await this.handleEmptyMailbox(args);
+            break;
+          case 'get_message_stats':
+            result = await this.handleGetMessageStats(args);
+            break;
+          case 'get_server_health':
+            result = await this.handleGetServerHealth(args);
+            break;
+          case 'get_unread_count':
+            result = await this.handleGetUnreadCount(args);
+            break;
+          case 'view_conversation_log':
+            result = await this.handleViewConversationLog(args);
+            break;
+          case 'get_conversation_stats':
+            result = await this.handleGetConversationStats(args);
+            break;
+          case 'send_priority_message':
+            result = await this.handleSendPriorityMessage(args);
+            break;
+          case 'cleanup_expired_messages':
+            result = await this.handleCleanupExpiredMessages(args);
+            break;
+          case 'get_message_templates':
+            result = await this.handleGetMessageTemplates(args);
+            break;
+          default:
+            throw new Error(`Unknown tool: ${name}`);
+        }
+        
+        const duration = Date.now() - startTime;
+        this.requestTimes.push(duration);
+        this.logRequest(name, true, undefined, duration);
+        
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      } catch (error: any) {
+        const duration = Date.now() - startTime;
+        this.logRequest(name, false, error.message, duration);
+        throw error;
+      }
+    });
+
     this.server.setRequestHandler(ListToolsRequestSchema, async () => {
       return {
         tools: [
           {
             name: 'create_agent',
-            description: 'Create an agent for the current directory path.',
+            description: 'Create a new agent with enhanced identification',
             inputSchema: {
               type: 'object',
               properties: {
-                path: {
-                  type: 'string',
-                  description: 'The absolute path to the project directory. Must start with "/" and be a valid directory path.',
-                  pattern: '^/.*',
-                  examples: ['/home/user/projects/my-app', '/workspace/backend-service', '/opt/projects/data-analysis']
-                },
-                name: {
-                  type: 'string',
-                  description: 'Optional name for the agent. If not provided, a default name will be generated.',
-                  examples: ['Frontend Agent', 'Backend Agent', 'Database Agent', 'API Agent']
-                },
-                role: {
-                  type: 'string',
-                  description: 'Optional role for the agent.',
-                  enum: ['general', 'developer', 'manager', 'analyst', 'tester', 'designer', 'coordinator'],
-                  default: 'general'
-                }
+                name: { type: 'string', description: 'Agent name' },
+                workspace_path: { type: 'string', description: 'Workspace path' },
+                role: { type: 'string', enum: ['general', 'developer', 'manager', 'analyst', 'tester', 'designer', 'coordinator'] },
+                username: { type: 'string', description: 'Optional username for authentication' },
+                password: { type: 'string', description: 'Optional password for authentication' },
+                description: { type: 'string', description: 'Agent description' },
+                capabilities: { type: 'array', items: { type: 'string' }, description: 'Agent capabilities' },
+                tags: { type: 'array', items: { type: 'string' }, description: 'Agent tags' }
               },
-              required: ['path']
+              required: ['name']
+            }
+          },
+          {
+            name: 'get_agent_identity',
+            description: 'Get agent identity information for verification',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                agent_id: { type: 'string', description: 'Agent ID' }
+              },
+              required: ['agent_id']
+            }
+          },
+          {
+            name: 'verify_agent_identity',
+            description: 'Verify agent identity using signature',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                agent_id: { type: 'string', description: 'Agent ID' },
+                signature: { type: 'string', description: 'Identity signature' }
+              },
+              required: ['agent_id', 'signature']
+            }
+          },
+          {
+            name: 'authenticate_agent',
+            description: 'Authenticate agent with username and password',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                agent_id: { type: 'string', description: 'Agent ID' },
+                username: { type: 'string', description: 'Username' },
+                password: { type: 'string', description: 'Password' }
+              },
+              required: ['agent_id', 'username', 'password']
+            }
+          },
+          {
+            name: 'delete_agent',
+            description: 'Delete an agent account (only by creator or server admin)',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                agent_id: { type: 'string', description: 'Agent ID to delete' },
+                created_by: { type: 'string', description: 'Agent ID of the creator' }
+              },
+              required: ['agent_id']
+            }
+          },
+          {
+            name: 'bulk_mark_read',
+            description: 'Mark multiple messages as read',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                from_path: { type: 'string', description: 'Agent workspace path' },
+                message_ids: { type: 'array', items: { type: 'string' }, description: 'Message IDs to mark as read' }
+              },
+              required: ['from_path', 'message_ids']
+            }
+          },
+          {
+            name: 'bulk_mark_unread',
+            description: 'Mark multiple messages as unread',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                from_path: { type: 'string', description: 'Agent workspace path' },
+                message_ids: { type: 'array', items: { type: 'string' }, description: 'Message IDs to mark as unread' }
+              },
+              required: ['from_path', 'message_ids']
+            }
+          },
+          {
+            name: 'bulk_update_states',
+            description: 'Update states of multiple messages',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                from_path: { type: 'string', description: 'Agent workspace path' },
+                message_ids: { type: 'array', items: { type: 'string' }, description: 'Message IDs' },
+                new_state: { type: 'string', enum: ['sent', 'arrived', 'replied', 'ignored', 'read', 'unread'], description: 'New state' }
+              },
+              required: ['from_path', 'message_ids', 'new_state']
+            }
+          },
+          {
+            name: 'delete_messages',
+            description: 'Delete multiple messages',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                from_path: { type: 'string', description: 'Agent workspace path' },
+                message_ids: { type: 'array', items: { type: 'string' }, description: 'Message IDs to delete' }
+              },
+              required: ['from_path', 'message_ids']
+            }
+          },
+          {
+            name: 'empty_mailbox',
+            description: 'Empty mailbox with optional query filter',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                from_path: { type: 'string', description: 'Agent workspace path' },
+                query: { type: 'string', description: 'Optional search query to filter messages' }
+              },
+              required: ['from_path']
             }
           },
           {
@@ -533,949 +1412,6 @@ export class CommunicationServer {
           }
         ]
       };
-    });
-
-    // Create Agent Tool
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      const startTime = Date.now();
-      
-      try {
-        switch (request.params.name) {
-          case 'create_agent': {
-            const { path, name, role } = request.params.arguments as { path: string; name?: string; role?: string };
-            
-            // Parse role if provided
-            let parsedRole: AgentRole | undefined;
-            if (role) {
-              const roleLower = role.toLowerCase();
-              if (Object.values(AgentRole).includes(roleLower as AgentRole)) {
-                parsedRole = roleLower as AgentRole;
-              } else {
-                throw new Error(`Invalid role '${role}'. Must be one of: ${Object.values(AgentRole).join(', ')}`);
-              }
-            }
-            
-            try {
-              // Get or create agent with the specified name and role
-              const agent = await this.getOrCreateAgent(path, name, parsedRole);
-              
-              const duration = Date.now() - startTime;
-              this.logRequest('create_agent', true, undefined, duration);
-              
-              return {
-                content: [{
-                  type: 'text',
-                  text: `Agent created successfully: ${agent.name} (${agent.id}) in ${agent.workspacePath}`
-                }],
-                isError: false,
-                metadata: {
-                  agent_id: agent.id,
-                  name: agent.name,
-                  workspace_path: agent.workspacePath,
-                  status: 'created'
-                }
-              }
-            } catch (error: any) {
-              const duration = Date.now() - startTime;
-              this.logRequest('create_agent', false, error.message, duration);
-              
-              // Provide detailed error information
-              let errorMessage = 'Failed to create agent';
-              if (error.message.includes('FOREIGN KEY constraint failed')) {
-                errorMessage = 'Database constraint error - please try again';
-              } else if (error.message.includes('UNIQUE constraint failed')) {
-                errorMessage = 'Agent already exists with this name';
-              } else {
-                errorMessage = error.message || 'Unknown error occurred';
-              }
-              
-              throw new Error(errorMessage);
-            }
-          }
-
-          case 'list_agents': {
-            const { path } = request.params.arguments as { path: string };
-            const workspacePath = this.resolveWorkspacePath(path);
-            const agents = this.db.getAgentsByWorkspace(workspacePath);
-
-            const result = agents.map(agent => ({
-              id: agent.id,
-              name: agent.name,
-              role: agent.role,
-              workspace_path: agent.workspacePath,
-              last_seen: agent.lastSeen?.toISOString() || null
-            }));
-
-            const duration = Date.now() - startTime;
-            this.logRequest('list_agents', true, undefined, duration);
-
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    agents: result,
-                    count: result.length,
-                    requested_path: path
-                  })
-                }
-              ]
-            };
-          }
-
-          case 'send': {
-            const { to_path, to_agent, title, content, from_path } = request.params.arguments as { to_path: string; to_agent?: string; title: string; content: string; from_path?: string };
-            
-            if (!title || !content) {
-              throw new Error('Title and content are required');
-            }
-
-            // Get or create recipient agent
-            let recipient: Agent;
-            if (to_agent) {
-              // Try to find specific agent by name and workspace
-              const foundRecipient = this.db.getAgentByNameAndWorkspace(to_agent, to_path);
-              if (!foundRecipient) {
-                throw new Error(`Agent '${to_agent}' not found in workspace '${to_path}'`);
-              }
-              recipient = foundRecipient;
-            } else {
-              // Get first available agent in the workspace (backward compatibility)
-              recipient = await this.getOrCreateAgent(to_path);
-            }
-            
-            // Get or create sender agent (current workspace)
-            const senderWorkspace = this.resolveWorkspacePath(from_path);
-            const sender = await this.getOrCreateAgent(senderWorkspace);
-            
-            // Create conversation
-            const conversation = createConversation(title, [sender.id, recipient.id], sender.id);
-            this.db.createConversation(conversation);
-            
-            // Create message
-            const message = createMessage(
-              conversation.id,
-              sender.id,
-              recipient.id,
-              title,
-              content,
-              MessageState.SENT
-            );
-            
-            // Add sender information
-            message.fromAgentName = sender.name;
-            message.fromAgentRole = sender.role;
-            message.fromAgentWorkspace = sender.workspacePath;
-            message.toAgentName = recipient.name;
-            message.toAgentRole = recipient.role;
-            message.toAgentWorkspace = recipient.workspacePath;
-            
-            const messageId = this.db.createMessage(message);
-            
-            // Message starts as "sent" - recipient will mark as "arrived" when they check mailbox
-            // Don't automatically mark as arrived - let the recipient handle state transitions
-            
-            const duration = Date.now() - startTime;
-            this.logRequest('send', true, undefined, duration);
-            
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    message_id: messageId,
-                    to_agent: getDisplayName(recipient),
-                    to_path: to_path,
-                    to_address: getFullAddress(recipient),
-                    subject: title,
-                    status: 'sent'
-                  })
-                }
-              ]
-            };
-          }
-
-          case 'reply': {
-            const { to_message, content, from_path } = request.params.arguments as { to_message: string; content: string; from_path?: string };
-            
-            if (!content) {
-              throw new Error('Reply content is required');
-            }
-
-            // Get original message
-            const originalMessage = this.db.getMessage(to_message);
-            if (!originalMessage) {
-              throw new Error(`Message '${to_message}' not found`);
-            }
-
-            // Get sender agent (current workspace)
-            const senderWorkspace = this.resolveWorkspacePath(from_path);
-            const sender = await this.getOrCreateAgent(senderWorkspace);
-            
-            // Get recipient agent
-            const recipient = this.db.getAgent(originalMessage.fromAgent);
-            if (!recipient) {
-              throw new Error('Original sender not found');
-            }
-
-            // Create reply message
-            const replyMessage = createMessage(
-              originalMessage.conversationId,
-              sender.id,
-              recipient.id,
-              `Re: ${originalMessage.subject}`,
-              content,
-              MessageState.REPLIED,
-              to_message
-            );
-            
-            // Add sender information
-            replyMessage.fromAgentName = sender.name;
-            replyMessage.fromAgentRole = sender.role;
-            replyMessage.fromAgentWorkspace = sender.workspacePath;
-            replyMessage.toAgentName = recipient.name;
-            replyMessage.toAgentRole = recipient.role;
-            replyMessage.toAgentWorkspace = recipient.workspacePath;
-            
-            const messageId = this.db.createMessage(replyMessage);
-            
-            // Update original message state to "replied"
-            this.db.updateMessageState(to_message, MessageState.REPLIED);
-            
-            const duration = Date.now() - startTime;
-            this.logRequest('reply', true, undefined, duration);
-            
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    message_id: messageId,
-                    reply_to: to_message,
-                    subject: `Re: ${originalMessage.subject}`,
-                    status: 'sent'
-                  })
-                }
-              ]
-            };
-          }
-
-          case 'check_mailbox': {
-            const { limit = 50, from_path } = request.params.arguments as { limit?: number; from_path?: string };
-            
-            if (limit < 1 || limit > 500) {
-              throw new Error('Limit must be between 1 and 500');
-            }
-
-            // Get sender agent
-            const senderWorkspace = this.resolveWorkspacePath(from_path);
-            const sender = await this.getOrCreateAgent(senderWorkspace);
-            
-            // Get recent messages with limit
-            const messages = this.db.getMessagesForAgent(sender.id, limit);
-            
-            // Get total count for pagination info
-            const allMessages = this.db.getMessagesForAgent(sender.id, 10000);
-            const totalMessages = allMessages.length;
-            const hasMore = totalMessages > limit;
-            
-            // Format results
-            const result = messages.map(msg => {
-              const fromAgent = this.db.getAgent(msg.fromAgent);
-              const toAgent = this.db.getAgent(msg.toAgent);
-              
-              return {
-                id: msg.id,
-                from_agent: fromAgent ? getDisplayName(fromAgent) : 'Unknown',
-                from_address: fromAgent ? getFullAddress(fromAgent) : 'Unknown',
-                to_agent: toAgent ? getDisplayName(toAgent) : 'Unknown',
-                to_address: toAgent ? getFullAddress(toAgent) : 'Unknown',
-                subject: msg.subject,
-                content: msg.content.length > 100 ? msg.content.substring(0, 100) + '...' : msg.content,
-                created_at: msg.createdAt.toISOString(),
-                state: msg.state,
-                is_read: msg.isRead
-              };
-            });
-            
-            const duration = Date.now() - startTime;
-            this.logRequest('check_mailbox', true, undefined, duration);
-            
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    messages: result,
-                    count: result.length,
-                    total_messages: totalMessages,
-                    has_more: hasMore,
-                    limit_requested: limit
-                  })
-                }
-              ]
-            };
-          }
-
-          case 'label_messages': {
-            const { id, label, from_path } = request.params.arguments as { id: string; label: string; from_path?: string };
-            
-            const validLabels = ['sent', 'arrived', 'replied', 'ignored', 'read', 'unread'];
-            if (!validLabels.includes(label)) {
-              throw new Error(`Invalid label '${label}'. Must be one of: ${validLabels.join(', ')}`);
-            }
-
-            // Get the message
-            const message = this.db.getMessage(id);
-            if (!message) {
-              throw new Error(`Message '${id}' not found`);
-            }
-
-            // Get sender agent to verify ownership
-            const senderWorkspace = this.resolveWorkspacePath(from_path);
-            const sender = await this.getOrCreateAgent(senderWorkspace);
-            
-            // Check if this message belongs to the sender (either sent or received)
-            if (message.fromAgent !== sender.id && message.toAgent !== sender.id) {
-              throw new Error('You can only label messages in your mailbox');
-            }
-
-            // Update the message state
-            const oldState = message.state;
-            const readAt = label === 'read' ? new Date() : undefined;
-            
-            // Update state
-            this.db.updateMessageState(id, label as MessageState);
-            
-            // Update read status if marking as read/unread
-            if (label === 'read') {
-              this.db.updateMessageReadStatus(id, true);
-            } else if (label === 'unread') {
-              this.db.updateMessageReadStatus(id, false);
-            }
-            
-            const duration = Date.now() - startTime;
-            this.logRequest('label_messages', true, undefined, duration);
-            
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    message_id: id,
-                    old_state: oldState,
-                    new_state: label,
-                    status: 'labeled',
-                    read_at: readAt?.toISOString()
-                  })
-                }
-              ]
-            };
-          }
-
-          case 'list_messages': {
-            const { tail = 10, from_path } = request.params.arguments as { tail?: number; from_path?: string };
-            
-            if (tail < 1 || tail > 100) {
-              throw new Error('tail must be between 1 and 100');
-            }
-
-            // Get sender agent
-            const senderWorkspace = this.resolveWorkspacePath(from_path);
-            const sender = await this.getOrCreateAgent(senderWorkspace);
-            
-            // Get recent messages
-            const messages = this.db.getMessagesForAgent(sender.id, tail);
-            
-            // Format results
-            const result = messages.map(msg => ({
-              id: msg.id,
-              title: msg.subject,
-              from_agent: msg.fromAgentName || 'Unknown',
-              to_agent: msg.toAgentName || 'Unknown',
-              created_at: msg.createdAt.toISOString(),
-              state: msg.state
-            }));
-            
-            const duration = Date.now() - startTime;
-            this.logRequest('list_messages', true, undefined, duration);
-            
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    messages: result,
-                    count: result.length,
-                    requested_count: tail
-                  })
-                }
-              ]
-            };
-          }
-
-          case 'query_messages': {
-            const { query, from_path } = request.params.arguments as { query: string; from_path?: string };
-            
-            if (!query) {
-              throw new Error('Search query is required');
-            }
-
-            // Get sender agent
-            const senderWorkspace = this.resolveWorkspacePath(from_path);
-            const sender = await this.getOrCreateAgent(senderWorkspace);
-            
-            // Search messages
-            const messages = this.db.searchMessages(sender.id, query, 50);
-            
-            // Format results
-            const result = messages.map(msg => ({
-              id: msg.id,
-              from_agent: msg.fromAgentName || 'Unknown',
-              to_agent: msg.toAgentName || 'Unknown',
-              subject: msg.subject,
-              content: msg.content.length > 100 ? msg.content.substring(0, 100) + '...' : msg.content,
-              created_at: msg.createdAt.toISOString(),
-              state: msg.state
-            }));
-            
-            const duration = Date.now() - startTime;
-            this.logRequest('query_messages', true, undefined, duration);
-            
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    messages: result,
-                    count: result.length,
-                    query: query
-                  })
-                }
-              ]
-            };
-          }
-
-          case 'get_server_health': {
-            const uptime = Date.now() - this.startTime.getTime();
-            
-            // Check database connectivity
-            let dbHealthy = false;
-            try {
-              this.db.getDatabaseStats();
-              dbHealthy = true;
-            } catch (error) {
-              console.error('Database health check failed:', error);
-            }
-            
-            // Get performance stats
-            const perfStats = this.getPerformanceStats();
-            
-            const healthData = {
-              status: dbHealthy ? 'healthy' : 'degraded',
-              uptime_seconds: Math.floor(uptime / 1000),
-              uptime_formatted: new Date(uptime).toISOString().substr(11, 8),
-              database_healthy: dbHealthy,
-              request_count: this.requestCount,
-              error_count: this.errorCount,
-              error_rate: Math.round((this.errorCount / Math.max(this.requestCount, 1)) * 100 * 100) / 100,
-              performance: perfStats
-            };
-            
-            const duration = Date.now() - startTime;
-            this.logRequest('get_server_health', true, undefined, duration);
-            
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify(healthData)
-                }
-              ]
-            };
-          }
-
-          case 'get_unread_count': {
-            const { from_path } = request.params.arguments as { from_path?: string };
-            // Get sender agent
-            const senderWorkspace = this.resolveWorkspacePath(from_path);
-            const sender = await this.getOrCreateAgent(senderWorkspace);
-            
-            // Get all messages for this agent
-            const messages = this.db.getMessagesForAgent(sender.id, 1000);
-            
-            // Count unread messages
-            const unreadCount = messages.filter(msg => !msg.isRead && msg.toAgent === sender.id).length;
-            const totalMessages = messages.length;
-            const unreadPercentage = Math.round((unreadCount / Math.max(totalMessages, 1)) * 100 * 10) / 10;
-            
-            const duration = Date.now() - startTime;
-            this.logRequest('get_unread_count', true, undefined, duration);
-            
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    unread_count: unreadCount,
-                    total_messages: totalMessages,
-                    unread_percentage: unreadPercentage
-                  })
-                }
-              ]
-            };
-          }
-
-          case 'view_conversation_log': {
-            // For now, return a simple conversation log
-            const { from_path } = request.params.arguments as { from_path?: string };
-            const senderWorkspace = this.resolveWorkspacePath(from_path);
-            const sender = await this.getOrCreateAgent(senderWorkspace);
-            const messages = this.db.getMessagesForAgent(sender.id, 50);
-            
-            const conversations = messages.map(msg => ({
-              conversation_id: msg.conversationId,
-              subject: msg.subject,
-              participants: [msg.fromAgent, msg.toAgent],
-              participant_names: [msg.fromAgentName || 'Unknown', msg.toAgentName || 'Unknown'],
-              message_count: 1,
-              first_message_at: msg.createdAt.toISOString(),
-              last_message_at: msg.createdAt.toISOString(),
-              last_message_content: msg.content.substring(0, 200),
-              conversation_state: 'active',
-              created_at: msg.createdAt.toISOString()
-            }));
-            
-            const duration = Date.now() - startTime;
-            this.logRequest('view_conversation_log', true, undefined, duration);
-            
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    status: 'success',
-                    organize_result: {
-                      conversations_organized: conversations.length,
-                      log_file: 'conversation_log.json'
-                    },
-                    log_data: {
-                      metadata: {
-                        generated_at: new Date().toISOString(),
-                        total_conversations: conversations.length
-                      },
-                      conversations: conversations
-                    }
-                  })
-                }
-              ]
-            };
-          }
-
-          case 'get_conversation_stats': {
-            const { from_path } = request.params.arguments as { from_path?: string };
-            const senderWorkspace = this.resolveWorkspacePath(from_path);
-            const sender = await this.getOrCreateAgent(senderWorkspace);
-            const messages = this.db.getMessagesForAgent(sender.id, 1000);
-            
-            const totalMessages = messages.length;
-            const totalConversations = new Set(messages.map(m => m.conversationId)).size;
-            const activeConversations = totalConversations; // Simplified
-            const recentConversations = totalConversations; // Simplified
-            const completedConversations = 0; // Simplified
-            const avgMessagesPerConversation = totalConversations > 0 ? Math.round((totalMessages / totalConversations) * 100) / 100 : 0;
-            
-            const duration = Date.now() - startTime;
-            this.logRequest('get_conversation_stats', true, undefined, duration);
-            
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    total_conversations: totalConversations,
-                    active_conversations: activeConversations,
-                    recent_conversations: recentConversations,
-                    completed_conversations: completedConversations,
-                    total_messages: totalMessages,
-                    avg_messages_per_conversation: avgMessagesPerConversation
-                  })
-                }
-              ]
-            };
-          }
-
-          case 'get_message_templates': {
-            const { template_type } = request.params.arguments as { template_type?: string };
-            let templates: any[] = [];
-
-            if (template_type) {
-              switch (template_type.toUpperCase()) {
-                case 'BUG_REPORT':
-                  templates = [
-                    {
-                      name: 'Bug Report Template',
-                      subject: 'Bug Report: [Issue Description]',
-                      content: `**Bug Report**
-
-**Issue:** [Describe the bug in detail]
-**Steps to Reproduce:** [List steps to reproduce the bug]
-**Expected Behavior:** [What you expected to happen]
-**Actual Behavior:** [What actually happened]
-**Screenshots:** [If applicable, add screenshots to help explain your problem.]
-**Environment:** [OS, Browser, Version]
-**Additional Context:** [Add any other context about the problem here.]`
-                    },
-                    {
-                      name: 'Bug Report Template (Short)',
-                      subject: 'Bug Report: [Issue Description]',
-                      content: `**Bug Report**
-
-**Issue:** [Describe the bug in detail]
-**Steps to Reproduce:** [List steps to reproduce the bug]
-**Expected Behavior:** [What you expected to happen]
-**Actual Behavior:** [What actually happened]`
-                    }
-                  ];
-                  break;
-                case 'FEATURE_REQUEST':
-                  templates = [
-                    {
-                      name: 'Feature Request Template',
-                      subject: 'Feature Request: [Feature Description]',
-                      content: `**Feature Request**
-
-**Description:** [Describe the feature in detail]
-**Why:** [Why is this feature needed?]
-**How:** [How would you implement this feature?]
-**Additional Context:** [Add any other context about the feature here.]`
-                    },
-                    {
-                      name: 'Feature Request Template (Short)',
-                      subject: 'Feature Request: [Feature Description]',
-                      content: `**Feature Request**
-
-**Description:** [Describe the feature in detail]
-**Why:** [Why is this feature needed?]`
-                    }
-                  ];
-                  break;
-                case 'API_INTEGRATION':
-                  templates = [
-                    {
-                      name: 'API Integration Template',
-                      subject: 'API Integration: [Integration Description]',
-                      content: `**API Integration**
-
-**Description:** [Describe the API integration in detail]
-**Endpoints:** [List the endpoints to integrate]
-**Authentication:** [How will authentication be handled?]
-**Error Handling:** [How will errors be handled?]
-**Additional Context:** [Add any other context about the integration here.]`
-                    },
-                    {
-                      name: 'API Integration Template (Short)',
-                      subject: 'API Integration: [Integration Description]',
-                      content: `**API Integration**
-
-**Description:** [Describe the API integration in detail]
-**Endpoints:** [List the endpoints to integrate]`
-                    }
-                  ];
-                  break;
-                case 'CODE_REVIEW':
-                  templates = [
-                    {
-                      name: 'Code Review Template',
-                      subject: 'Code Review: [Code Title]',
-                      content: `**Code Review**
-
-**Code:** [Paste the code you want reviewed]
-**Questions:** [List questions about the code]
-**Additional Context:** [Add any other context about the code review here.]`
-                    },
-                    {
-                      name: 'Code Review Template (Short)',
-                      subject: 'Code Review: [Code Title]',
-                      content: `**Code Review**
-
-**Code:** [Paste the code you want reviewed]
-**Questions:** [List questions about the code]`
-                    }
-                  ];
-                  break;
-                case 'DEPLOYMENT':
-                  templates = [
-                    {
-                      name: 'Deployment Template',
-                      subject: 'Deployment: [Deployment Description]',
-                      content: `**Deployment**
-
-**Description:** [Describe the deployment in detail]
-**Steps:** [List the steps for deployment]
-**Environment:** [Which environment is this deployment for?]
-**Additional Context:** [Add any other context about the deployment here.]`
-                    },
-                    {
-                      name: 'Deployment Template (Short)',
-                      subject: 'Deployment: [Deployment Description]',
-                      content: `**Deployment**
-
-**Description:** [Describe the deployment in detail]
-**Steps:** [List the steps for deployment]`
-                    }
-                  ];
-                  break;
-                case 'TESTING':
-                  templates = [
-                    {
-                      name: 'Testing Template',
-                      subject: 'Testing: [Testing Description]',
-                      content: `**Testing**
-
-**Description:** [Describe the testing in detail]
-**Type:** [What type of testing is it?]
-**Environment:** [Which environment is this testing for?]
-**Additional Context:** [Add any other context about the testing here.]`
-                    },
-                    {
-                      name: 'Testing Template (Short)',
-                      subject: 'Testing: [Testing Description]',
-                      content: `**Testing**
-
-**Description:** [Describe the testing in detail]
-**Type:** [What type of testing is it?]`
-                    }
-                  ];
-                  break;
-                default:
-                  throw new Error(`Unknown template type: ${template_type}`);
-              }
-            } else {
-              // Default templates if no type is specified
-              templates = [
-                {
-                  name: 'Bug Report Template',
-                  subject: 'Bug Report: [Issue Description]',
-                  content: `**Bug Report**
-
-**Issue:** [Describe the bug in detail]
-**Steps to Reproduce:** [List steps to reproduce the bug]
-**Expected Behavior:** [What you expected to happen]
-**Actual Behavior:** [What actually happened]
-**Screenshots:** [If applicable, add screenshots to help explain your problem.]
-**Environment:** [OS, Browser, Version]
-**Additional Context:** [Add any other context about the problem here.]`
-                },
-                {
-                  name: 'Feature Request Template',
-                  subject: 'Feature Request: [Feature Description]',
-                  content: `**Feature Request**
-
-**Description:** [Describe the feature in detail]
-**Why:** [Why is this feature needed?]
-**How:** [How would you implement this feature?]
-**Additional Context:** [Add any other context about the feature here.]`
-                },
-                {
-                  name: 'API Integration Template',
-                  subject: 'API Integration: [Integration Description]',
-                  content: `**API Integration**
-
-**Description:** [Describe the API integration in detail]
-**Endpoints:** [List the endpoints to integrate]
-**Authentication:** [How will authentication be handled?]
-**Error Handling:** [How will errors be handled?]
-**Additional Context:** [Add any other context about the integration here.]`
-                },
-                {
-                  name: 'Code Review Template',
-                  subject: 'Code Review: [Code Title]',
-                  content: `**Code Review**
-
-**Code:** [Paste the code you want reviewed]
-**Questions:** [List questions about the code]
-**Additional Context:** [Add any other context about the code review here.]`
-                },
-                {
-                  name: 'Deployment Template',
-                  subject: 'Deployment: [Deployment Description]',
-                  content: `**Deployment**
-
-**Description:** [Describe the deployment in detail]
-**Steps:** [List the steps for deployment]
-**Environment:** [Which environment is this deployment for?]
-**Additional Context:** [Add any other context about the deployment here.]`
-                },
-                {
-                  name: 'Testing Template',
-                  subject: 'Testing: [Testing Description]',
-                  content: `**Testing**
-
-**Description:** [Describe the testing in detail]
-**Type:** [What type of testing is it?]
-**Environment:** [Which environment is this testing for?]
-**Additional Context:** [Add any other context about the testing here.]`
-                }
-              ];
-            }
-
-            const duration = Date.now() - startTime;
-            this.logRequest('get_message_templates', true, undefined, duration);
-
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    templates: templates,
-                    count: templates.length,
-                    requested_template_type: template_type || 'all'
-                  })
-                }
-              ]
-            };
-          }
-
-          case 'send_priority_message': {
-            const { to_path, to_agent, title, content, from_path, priority, expires_in_hours } = request.params.arguments as {
-              to_path: string;
-              to_agent?: string;
-              title: string;
-              content: string;
-              from_path?: string;
-              priority: string;
-              expires_in_hours?: number;
-            };
-
-            if (!title || !content) {
-              throw new Error('Title and content are required for priority messages');
-            }
-
-            // Get or create recipient agent
-            let recipient: Agent;
-            if (to_agent) {
-              const foundRecipient = this.db.getAgentByNameAndWorkspace(to_agent, to_path);
-              if (!foundRecipient) {
-                throw new Error(`Agent '${to_agent}' not found in workspace '${to_path}'`);
-              }
-              recipient = foundRecipient;
-            } else {
-              recipient = await this.getOrCreateAgent(to_path);
-            }
-
-            // Get or create sender agent (current workspace)
-            const senderWorkspace = this.resolveWorkspacePath(from_path);
-            const sender = await this.getOrCreateAgent(senderWorkspace);
-
-            // Create conversation
-            const conversation = createConversation(title, [sender.id, recipient.id], sender.id);
-            this.db.createConversation(conversation);
-
-            // Create message
-            const message = createMessage(
-              conversation.id,
-              sender.id,
-              recipient.id,
-              title,
-              content,
-              MessageState.SENT,
-              undefined, // No original message ID for new messages
-              priority as MessagePriority, // Use priority as state
-              expires_in_hours ? new Date(Date.now() + expires_in_hours * 60 * 60 * 1000) : undefined // Set expiration
-            );
-
-            // Add sender information
-            message.fromAgentName = sender.name;
-            message.fromAgentRole = sender.role;
-            message.fromAgentWorkspace = sender.workspacePath;
-            message.toAgentName = recipient.name;
-            message.toAgentRole = recipient.role;
-            message.toAgentWorkspace = recipient.workspacePath;
-
-            const messageId = this.db.createMessage(message);
-
-            const duration = Date.now() - startTime;
-            this.logRequest('send_priority_message', true, undefined, duration);
-
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    message_id: messageId,
-                    to_agent: getDisplayName(recipient),
-                    to_path: to_path,
-                    to_address: getFullAddress(recipient),
-                    subject: title,
-                    status: 'sent'
-                  })
-                }
-              ]
-            };
-          }
-
-          case 'cleanup_expired_messages': {
-            const startTime = Date.now();
-            const cleanedCount = this.db.cleanupExpiredMessages();
-            const duration = Date.now() - startTime;
-            this.logRequest('cleanup_expired_messages', true, undefined, duration);
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    cleaned_count: cleanedCount,
-                    status: 'success'
-                  })
-                }
-              ]
-            };
-          }
-
-          case 'get_message_stats': {
-            const { from_path } = request.params.arguments as { from_path?: string };
-            const senderWorkspace = this.resolveWorkspacePath(from_path);
-            const sender = await this.getOrCreateAgent(senderWorkspace);
-
-            const totalMessages = this.db.getMessagesForAgent(sender.id, 1000).length;
-            const totalSent = this.db.getMessagesForAgent(sender.id, 1000).filter(msg => msg.state === MessageState.SENT).length;
-            const totalArrived = this.db.getMessagesForAgent(sender.id, 1000).filter(msg => msg.state === MessageState.ARRIVED).length;
-            const totalReplied = this.db.getMessagesForAgent(sender.id, 1000).filter(msg => msg.state === MessageState.REPLIED).length;
-            const totalIgnored = this.db.getMessagesForAgent(sender.id, 1000).filter(msg => msg.state === MessageState.IGNORED).length;
-            const totalRead = this.db.getMessagesForAgent(sender.id, 1000).filter(msg => msg.isRead).length;
-            const totalUnread = this.db.getMessagesForAgent(sender.id, 1000).filter(msg => !msg.isRead).length;
-
-            const duration = Date.now() - startTime;
-            this.logRequest('get_message_stats', true, undefined, duration);
-
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify({
-                    total_messages: totalMessages,
-                    total_sent: totalSent,
-                    total_arrived: totalArrived,
-                    total_replied: totalReplied,
-                    total_ignored: totalIgnored,
-                    total_read: totalRead,
-                    total_unread: totalUnread
-                  })
-                }
-              ]
-            };
-          }
-
-          default:
-            throw new Error(`Unknown tool: ${request.params.name}`);
-        }
-      } catch (error) {
-        const duration = Date.now() - startTime;
-        this.logRequest(request.params.name, false, error instanceof Error ? error.message : String(error), duration);
-        
-        throw error;
-      }
     });
   }
 

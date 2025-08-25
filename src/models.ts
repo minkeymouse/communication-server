@@ -3,8 +3,9 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
+import { createHash } from 'crypto';
 
-export const VERSION = "2.0.0";
+export const VERSION = "2.1.0";
 
 export enum AgentRole {
   GENERAL = "general",
@@ -32,6 +33,23 @@ export enum MessagePriority {
   URGENT = "urgent"
 }
 
+// Enhanced agent identification protocol
+export interface AgentIdentity {
+  identityHash: string;        // Unique hash based on workspace + name + creation time
+  publicKey: string;           // Public identifier for verification
+  signature: string;           // Cryptographic signature for authentication
+  fingerprint: string;         // Human-readable fingerprint for verification
+}
+
+export interface AgentCredentials {
+  username: string;            // Unique username for login
+  passwordHash: string;        // Hashed password for authentication
+  salt: string;                // Salt for password hashing
+  lastLogin?: Date;            // Last successful login
+  loginAttempts: number;       // Failed login attempts
+  lockedUntil?: Date;          // Account lockout until
+}
+
 export interface Agent {
   id: string;
   name: string;
@@ -43,6 +61,18 @@ export interface Agent {
   createdAt: Date;
   lastSeen?: Date;
   isActive: boolean;
+  
+  // Enhanced identification
+  identity: AgentIdentity;
+  credentials?: AgentCredentials;
+  
+  // Additional metadata for better identification
+  displayName: string;         // Human-readable display name
+  description?: string;        // Agent description
+  capabilities?: string[];     // List of agent capabilities
+  tags?: string[];             // Tags for categorization
+  version?: string;            // Agent version
+  createdBy?: string;          // Who created this agent (parent agent ID)
 }
 
 export interface Conversation {
@@ -116,11 +146,41 @@ export function createAgent(
   workspacePath?: string,
   role: AgentRole = AgentRole.GENERAL,
   email?: string,
-  address?: string
+  address?: string,
+  username?: string,
+  password?: string,
+  description?: string,
+  capabilities?: string[],
+  tags?: string[],
+  createdBy?: string
 ): Agent {
   const workspaceHash = workspacePath ? Math.abs(workspacePath.hashCode()) % 10000 : 0;
   const nameHash = Math.abs(name.hashCode()) % 1000;
   const agentId = `${workspaceHash.toString().padStart(4, '0')}-${nameHash.toString().padStart(3, '0')}-${uuidv4().slice(0, 8)}`;
+  
+  // Generate unique identity hash
+  const identityData = `${workspacePath || 'unknown'}:${name}:${Date.now()}`;
+  const identityHash = createHash('sha256').update(identityData).digest('hex').slice(0, 16);
+  
+  // Generate public key and signature
+  const publicKey = uuidv4();
+  const signature = createHash('sha256').update(`${identityHash}:${publicKey}`).digest('hex').slice(0, 16);
+  
+  // Generate fingerprint
+  const fingerprint = `${name}@${workspacePath ? getProjectName(workspacePath) : 'localhost'}`;
+  
+  // Create credentials if username/password provided
+  let credentials: AgentCredentials | undefined;
+  if (username && password) {
+    const salt = uuidv4();
+    const passwordHash = createHash('sha256').update(`${password}:${salt}`).digest('hex');
+    credentials = {
+      username,
+      passwordHash,
+      salt,
+      loginAttempts: 0
+    };
+  }
   
   return {
     id: agentId,
@@ -131,8 +191,56 @@ export function createAgent(
     workspacePath,
     address,
     createdAt: new Date(),
-    isActive: true
+    isActive: true,
+    identity: {
+      identityHash,
+      publicKey,
+      signature,
+      fingerprint
+    },
+    credentials,
+    displayName: `${name} (${workspacePath ? getProjectName(workspacePath) : 'unknown'})`,
+    description: description || `Agent for workspace: ${workspacePath || 'unknown'}`,
+    capabilities: capabilities || [],
+    tags: tags || [],
+    version: VERSION,
+    createdBy
   };
+}
+
+// Helper functions for agent identification
+export function generateAgentFingerprint(name: string, workspacePath?: string): string {
+  return `${name}@${workspacePath ? getProjectName(workspacePath) : 'localhost'}`;
+}
+
+export function verifyAgentIdentity(agent: Agent, providedSignature?: string): boolean {
+  if (!providedSignature) return false;
+  
+  const expectedSignature = createHash('sha256')
+    .update(`${agent.identity.identityHash}:${agent.identity.publicKey}`)
+    .digest('hex')
+    .slice(0, 16);
+  
+  return providedSignature === expectedSignature;
+}
+
+export function authenticateAgent(agent: Agent, username: string, password: string): boolean {
+  if (!agent.credentials) return false;
+  if (agent.credentials.username !== username) return false;
+  
+  const passwordHash = createHash('sha256')
+    .update(`${password}:${agent.credentials.salt}`)
+    .digest('hex');
+  
+  return passwordHash === agent.credentials.passwordHash;
+}
+
+export function getAgentIdentifier(agent: Agent): string {
+  return `${agent.identity.fingerprint} (${agent.id})`;
+}
+
+export function getAgentShortId(agent: Agent): string {
+  return agent.id.split('-')[2]; // Last part of the ID
 }
 
 export function createMessage(
