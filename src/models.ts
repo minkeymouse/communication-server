@@ -110,7 +110,8 @@ export function createAgent(
   address?: string
 ): Agent {
   const workspaceHash = workspacePath ? Math.abs(workspacePath.hashCode()) % 10000 : 0;
-  const agentId = `${workspaceHash.toString().padStart(4, '0')}-${uuidv4().slice(0, 8)}`;
+  const nameHash = Math.abs(name.hashCode()) % 1000;
+  const agentId = `${workspaceHash.toString().padStart(4, '0')}-${nameHash.toString().padStart(3, '0')}-${uuidv4().slice(0, 8)}`;
   
   return {
     id: agentId,

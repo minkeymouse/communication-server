@@ -8,7 +8,7 @@
     },
     "communication-server-dev": {
       "command": "node",
-      "args": ["{{LOCAL_DIST_PATH}}"],
+      "args": ["/data/communication_server/communication-server/dist/index.js"],
       "transport": "stdio",
       "terminate_on_close": true
     },

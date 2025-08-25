@@ -44,7 +44,7 @@ export class DatabaseManager {
         api_key TEXT NOT NULL UNIQUE,
         email TEXT,
         role TEXT DEFAULT 'general',
-        workspace_path TEXT UNIQUE,
+        workspace_path TEXT,
         address TEXT,
         created_at TEXT NOT NULL,
         last_seen TEXT,
@@ -220,8 +220,46 @@ export class DatabaseManager {
   }
 
   getAgentByWorkspace(workspacePath: string): Agent | null {
-    const stmt = this.db.prepare('SELECT * FROM agents WHERE workspace_path = ?');
+    const stmt = this.db.prepare('SELECT * FROM agents WHERE workspace_path = ? LIMIT 1');
     const row = stmt.get(workspacePath) as any;
+
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      name: row.name,
+      apiKey: row.api_key,
+      email: row.email,
+      role: row.role as AgentRole,
+      workspacePath: row.workspace_path,
+      address: row.address,
+      createdAt: new Date(row.created_at),
+      lastSeen: row.last_seen ? new Date(row.last_seen) : undefined,
+      isActive: Boolean(row.is_active)
+    };
+  }
+
+  getAgentsByWorkspace(workspacePath: string): Agent[] {
+    const stmt = this.db.prepare('SELECT * FROM agents WHERE workspace_path = ? AND is_active = 1 ORDER BY created_at');
+    const rows = stmt.all(workspacePath) as any[];
+
+    return rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      apiKey: row.api_key,
+      email: row.email,
+      role: row.role as AgentRole,
+      workspacePath: row.workspace_path,
+      address: row.address,
+      createdAt: new Date(row.created_at),
+      lastSeen: row.last_seen ? new Date(row.last_seen) : undefined,
+      isActive: Boolean(row.is_active)
+    }));
+  }
+
+  getAgentByNameAndWorkspace(name: string, workspacePath: string): Agent | null {
+    const stmt = this.db.prepare('SELECT * FROM agents WHERE name = ? AND workspace_path = ? AND is_active = 1');
+    const row = stmt.get(name, workspacePath) as any;
 
     if (!row) return null;
 
@@ -242,6 +280,16 @@ export class DatabaseManager {
   updateAgentLastSeen(agentId: string): void {
     const stmt = this.db.prepare('UPDATE agents SET last_seen = ? WHERE id = ?');
     stmt.run(new Date().toISOString(), agentId);
+  }
+
+  updateAgentName(agentId: string, name: string): void {
+    const stmt = this.db.prepare('UPDATE agents SET name = ? WHERE id = ?');
+    stmt.run(name, agentId);
+  }
+
+  updateAgentRole(agentId: string, role: AgentRole): void {
+    const stmt = this.db.prepare('UPDATE agents SET role = ? WHERE id = ?');
+    stmt.run(role, agentId);
   }
 
   // Conversation operations

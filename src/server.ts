@@ -98,28 +98,39 @@ export class CommunicationServer {
     };
   }
 
-  private async getOrCreateAgent(workspacePath: string): Promise<Agent> {
+  private async getOrCreateAgent(workspacePath: string, agentName?: string, role?: AgentRole): Promise<Agent> {
     // Validate workspace path
     if (!workspacePath || !workspacePath.startsWith('/')) {
       throw new Error("Invalid workspace path. Must be an absolute path starting with '/'");
     }
 
-    // Check if agent exists
-    const existingAgent = this.db.getAgentByWorkspace(workspacePath);
-    if (existingAgent) {
-      // Update last seen
-      this.db.updateAgentLastSeen(existingAgent.id);
-      return existingAgent;
+    // If a specific name is provided, check if that agent exists
+    if (agentName) {
+      const existingAgent = this.db.getAgentByNameAndWorkspace(agentName, workspacePath);
+      if (existingAgent) {
+        // Update last seen
+        this.db.updateAgentLastSeen(existingAgent.id);
+        return existingAgent;
+      }
+    } else {
+      // Check if any agent exists in this workspace (for backward compatibility)
+      const existingAgent = this.db.getAgentByWorkspace(workspacePath);
+      if (existingAgent) {
+        // Update last seen
+        this.db.updateAgentLastSeen(existingAgent.id);
+        return existingAgent;
+      }
     }
 
-    // Create new agent with address
+    // Create new agent
     const projectName = getProjectName(workspacePath);
-    const agentName = `${projectName.charAt(0).toUpperCase() + projectName.slice(1)} Agent`;
+    const defaultName = agentName || `${projectName.charAt(0).toUpperCase() + projectName.slice(1)} Agent`;
+    const defaultRole = role || AgentRole.GENERAL;
     
     // Generate a simple address based on workspace path
     const address = `LOC-${Math.abs(workspacePath.hashCode()) % 10000}`.padStart(8, '0');
     
-    const agent = createAgent(agentName, workspacePath, AgentRole.GENERAL, undefined, address);
+    const agent = createAgent(defaultName, workspacePath, defaultRole, undefined, address);
     
     const agentId = this.db.createAgent(agent);
     const newAgent = this.db.getAgent(agentId);
@@ -145,6 +156,33 @@ export class CommunicationServer {
                 path: {
                   type: 'string',
                   description: 'The absolute path to the project directory. Must start with "/" and be a valid directory path.',
+                  pattern: '^/.*',
+                  examples: ['/home/user/projects/my-app', '/workspace/backend-service', '/opt/projects/data-analysis']
+                },
+                name: {
+                  type: 'string',
+                  description: 'Optional name for the agent. If not provided, a default name will be generated.',
+                  examples: ['Frontend Agent', 'Backend Agent', 'Database Agent', 'API Agent']
+                },
+                role: {
+                  type: 'string',
+                  description: 'Optional role for the agent.',
+                  enum: ['general', 'developer', 'manager', 'analyst', 'tester', 'designer', 'coordinator'],
+                  default: 'general'
+                }
+              },
+              required: ['path']
+            }
+          },
+          {
+            name: 'list_agents',
+            description: 'List all agents in a specific workspace directory.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                path: {
+                  type: 'string',
+                  description: 'The absolute path to the project directory to list agents from.',
                   pattern: '^/.*',
                   examples: ['/home/user/projects/my-app', '/workspace/backend-service', '/opt/projects/data-analysis']
                 }
@@ -393,23 +431,64 @@ export class CommunicationServer {
       try {
         switch (request.params.name) {
           case 'create_agent': {
-            const { path } = request.params.arguments as { path: string };
-            const agent = await this.getOrCreateAgent(path);
-            const existingAgent = this.db.getAgentByWorkspace(path);
-            const status = existingAgent ? 'found' : 'created';
+            const { path, name, role } = request.params.arguments as { path: string; name?: string; role?: string };
+            
+            // Parse role if provided
+            let parsedRole: AgentRole | undefined;
+            if (role) {
+              const roleLower = role.toLowerCase();
+              if (Object.values(AgentRole).includes(roleLower as AgentRole)) {
+                parsedRole = roleLower as AgentRole;
+              } else {
+                throw new Error(`Invalid role '${role}'. Must be one of: ${Object.values(AgentRole).join(', ')}`);
+              }
+            }
+            
+            // Get or create agent with the specified name and role
+            const agent = await this.getOrCreateAgent(path, name, parsedRole);
             
             const duration = Date.now() - startTime;
             this.logRequest('create_agent', true, undefined, duration);
             
             return {
+              content: [{
+                type: 'text',
+                text: `Agent created successfully: ${agent.name} (${agent.id}) in ${agent.workspacePath}`
+              }],
+              isError: false,
+              metadata: {
+                agent_id: agent.id,
+                name: agent.name,
+                workspace_path: agent.workspacePath,
+                status: 'created'
+              }
+            }
+          }
+
+          case 'list_agents': {
+            const { path } = request.params.arguments as { path: string };
+            const workspacePath = this.resolveWorkspacePath(path);
+            const agents = this.db.getAgentsByWorkspace(workspacePath);
+
+            const result = agents.map(agent => ({
+              id: agent.id,
+              name: agent.name,
+              role: agent.role,
+              workspace_path: agent.workspacePath,
+              last_seen: agent.lastSeen?.toISOString() || null
+            }));
+
+            const duration = Date.now() - startTime;
+            this.logRequest('list_agents', true, undefined, duration);
+
+            return {
               content: [
                 {
                   type: 'text',
                   text: JSON.stringify({
-                    agent_id: agent.id,
-                    name: agent.name,
-                    workspace_path: agent.workspacePath,
-                    status
+                    agents: result,
+                    count: result.length,
+                    requested_path: path
                   })
                 }
               ]
