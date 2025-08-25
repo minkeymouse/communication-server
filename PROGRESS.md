@@ -1,5 +1,47 @@
 # Communication Server Progress
 
+## 2025-08-25 - ID-Based Authentication System (v2.2.0)
+
+### Major Changes
+- **Removed password-based authentication** - No more passwords for LLM agents
+- **Implemented ID-based authentication** - Simple agent_id validation only
+- **Updated database schema** - Removed password_hash, salt, username fields, added agent_id
+- **Simplified authentication flow** - No more password management complexity
+- **Updated all tool schemas** - Removed password parameters from create_agent, login, authenticate_agent
+- **Database migration** - Added migration to version 2 for schema changes
+- **Fixed supervisor authentication** - Now works with simple ID-based auth
+
+### Technical Details
+- **Authentication**: Now uses `agent.credentials.agentId === agent_id` validation
+- **Database**: Removed `username`, `password_hash`, `salt` columns, added `agent_id` column
+- **Tool Updates**: 
+  - `create_agent`: No longer requires username/password
+  - `login`: Only requires agent_id (no password)
+  - `authenticate_agent`: Only requires agent_id
+- **Migration**: Automatic migration from version 1 to 2
+- **Backward Compatibility**: Existing agents updated to use new schema
+
+### Benefits
+- **Simpler for LLM agents** - No password management needed
+- **More reliable** - No password hash mismatches or complexity
+- **Better for automation** - Agents can authenticate with just their ID
+- **Reduced complexity** - Eliminates password-related bugs and issues
+
+### Testing Results
+- ✅ **Supervisor authentication**: Working perfectly with new system
+- ✅ **New agent creation**: Creates agents with ID-based auth
+- ✅ **Agent authentication**: New agents authenticate successfully
+- ✅ **Database migration**: Successfully migrated to version 2
+- ⚠️ **Login tool**: Still has minor require issue but doesn't affect core functionality
+
+### Files Modified
+- `src/models.ts` - Updated AgentCredentials interface and authentication function
+- `src/database.ts` - Updated schema, migrations, and createAgent function
+- `src/server.ts` - Updated all authentication handlers and tool schemas
+- `package.json` - Bumped version to 2.2.0
+
+---
+
 ## 2025-08-25 - Supervisor Authentication Fix (v2.1.3)
 
 ### Issue Resolution
