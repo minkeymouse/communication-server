@@ -953,6 +953,92 @@ export class DatabaseManager {
     this.db.close();
   }
 
+  // Session management
+  createSession(agentId: string, durationMinutes: number = 30): { token: string, expiresAt: Date } {
+    const token = require('crypto').randomUUID();
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + durationMinutes * 60 * 1000);
+
+    const stmt = this.db.prepare(`
+      INSERT INTO agent_sessions (id, agent_id, session_token, created_at, expires_at, is_active)
+      VALUES (?, ?, ?, ?, ?, 1)
+    `);
+    stmt.run(require('crypto').randomUUID(), agentId, token, now.toISOString(), expiresAt.toISOString());
+
+    return { token, expiresAt };
+  }
+
+  getSession(sessionToken: string): { id: string, agentId: string, createdAt: Date, expiresAt: Date, isActive: boolean } | null {
+    const row = this.db.prepare('SELECT * FROM agent_sessions WHERE session_token = ?').get(sessionToken) as any;
+    if (!row) return null;
+    return {
+      id: row.id,
+      agentId: row.agent_id,
+      createdAt: new Date(row.created_at),
+      expiresAt: new Date(row.expires_at),
+      isActive: Boolean(row.is_active)
+    };
+  }
+
+  invalidateSession(sessionToken: string): boolean {
+    const stmt = this.db.prepare('UPDATE agent_sessions SET is_active = 0 WHERE session_token = ?');
+    const result = stmt.run(sessionToken);
+    return result.changes > 0;
+  }
+
+  invalidateAgentSessions(agentId: string): number {
+    const stmt = this.db.prepare('UPDATE agent_sessions SET is_active = 0 WHERE agent_id = ?');
+    const result = stmt.run(agentId);
+    return result.changes || 0;
+  }
+
+  listSessionsByAgent(agentId: string): Array<{ id: string, sessionToken: string, createdAt: Date, expiresAt: Date, isActive: boolean }> {
+    const rows = this.db.prepare('SELECT * FROM agent_sessions WHERE agent_id = ? ORDER BY created_at DESC').all(agentId) as any[];
+    return rows.map(r => ({ id: r.id, sessionToken: r.session_token, createdAt: new Date(r.created_at), expiresAt: new Date(r.expires_at), isActive: Boolean(r.is_active) }));
+  }
+
+  // Ghost agent utilities
+  getMessageCountForAgent(agentId: string): number {
+    const row = this.db.prepare('SELECT COUNT(*) as cnt FROM messages WHERE from_agent = ? OR to_agent = ?').get(agentId, agentId) as any;
+    return row ? (row.cnt || 0) : 0;
+  }
+
+  findGhostAgentsOlderThan(days: number = 7, noMessagesOnly: boolean = true): Agent[] {
+    const threshold = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const rows = this.db.prepare(
+      'SELECT * FROM agents WHERE is_active = 1 AND (last_seen IS NULL OR last_seen < ?)' 
+    ).all(threshold) as any[];
+
+    const candidates = rows.map(row => this.mapRowToAgent(row));
+    if (!noMessagesOnly) return candidates;
+    return candidates.filter(a => this.getMessageCountForAgent(a.id) === 0);
+  }
+
+  cleanupGhostAgents(days: number = 7, noMessagesOnly: boolean = true): { deleted: number, agentIds: string[] } {
+    const ghosts = this.findGhostAgentsOlderThan(days, noMessagesOnly);
+    let deleted = 0;
+    const agentIds: string[] = [];
+    for (const agent of ghosts) {
+      const ok = this.deleteAgent(agent.id);
+      if (ok) {
+        deleted++;
+        agentIds.push(agent.id);
+      }
+    }
+    return { deleted, agentIds };
+  }
+
+  // Counts
+  countAgentsInWorkspace(workspacePath: string): number {
+    const row = this.db.prepare('SELECT COUNT(*) as cnt FROM agents WHERE workspace_path = ? AND is_active = 1').get(workspacePath) as any;
+    return row ? (row.cnt || 0) : 0;
+  }
+
+  countAgentsTotal(): number {
+    const row = this.db.prepare('SELECT COUNT(*) as cnt FROM agents WHERE is_active = 1').get() as any;
+    return row ? (row.cnt || 0) : 0;
+  }
+
   getAgentByName(name: string): Agent | null {
     const stmt = this.db.prepare('SELECT * FROM agents WHERE name = ? AND is_active = 1');
     const row = stmt.get(name) as any;

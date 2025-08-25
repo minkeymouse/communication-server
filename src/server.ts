@@ -12,8 +12,8 @@ import {
   MessageState, 
   MessagePriority,
   AgentCredentials,
-  createAgent,
-  createMessage,
+  createAgent, 
+  createMessage, 
   createConversation,
   authenticateAgent,
   getAgentIdentifier,
@@ -269,7 +269,7 @@ export class CommunicationServer {
     if (!success) {
       this.errorCount++;
     }
-    
+
     const logMessage = `📈 Request #${this.requestCount}: ${toolName} - ${success ? 'SUCCESS' : 'ERROR'}${duration ? ` - ${duration}ms` : ''}`;
     
     if (success) {
@@ -311,10 +311,10 @@ export class CommunicationServer {
     // Try to find existing agent by name and workspace
     if (agentName) {
       const existingAgent = this.db.getAgentByNameAndWorkspace(agentName, workspacePath);
-      if (existingAgent) {
-        this.db.updateAgentLastSeen(existingAgent.id);
-        return existingAgent;
-      }
+    if (existingAgent) {
+      this.db.updateAgentLastSeen(existingAgent.id);
+      return existingAgent;
+    }
     }
 
     // Create new agent
@@ -340,6 +340,39 @@ export class CommunicationServer {
   }
 
   // Handler methods for new tools
+  private async handleLogin(args: any): Promise<any> {
+    const { agent_id, username, password, session_minutes = 30 } = args;
+    if (!agent_id || !username || !password) {
+      throw new Error('agent_id, username, and password are required');
+    }
+    const agent = this.db.getAgent(agent_id);
+    if (!agent) throw new Error(`Agent with ID '${agent_id}' not found`);
+    const ok = authenticateAgent(agent, username, password);
+    if (!ok) {
+      return { agent_id, authenticated: false };
+    }
+    // create session
+    const sess = this.db.createSession(agent_id, session_minutes);
+    return {
+      agent_id,
+      authenticated: true,
+      session_token: sess.token,
+      expires_at: sess.expiresAt.toISOString()
+    };
+  }
+
+  private async handleLogout(args: any): Promise<any> {
+    const { agent_id, session_token } = args;
+    if (session_token) {
+      const ok = this.db.invalidateSession(session_token);
+      return { session_token, invalidated: ok };
+    }
+    if (agent_id) {
+      const n = this.db.invalidateAgentSessions(agent_id);
+      return { agent_id, invalidated_sessions: n };
+    }
+    throw new Error('Provide session_token or agent_id');
+  }
   private async handleCreateAgent(args: any): Promise<any> {
     const { name, workspace_path, role, username, password, description, capabilities, tags, agent_id } = args;
     
@@ -358,6 +391,11 @@ export class CommunicationServer {
       };
     }
     
+    // Anti-ghost: require explicit name and agent_id; do not auto-create many defaults
+    if (!name || !agent_id) {
+      throw new Error('Agent creation requires explicit name and agent_id');
+    }
+
     const agent = createAgent(
       name,
       workspace_path,
@@ -407,6 +445,8 @@ export class CommunicationServer {
         last_seen: agent.lastSeen?.toISOString() || null
       })),
       count: agents.length,
+      total_in_workspace: this.db.countAgentsInWorkspace(workspacePath),
+      total_active_agents: this.db.countAgentsTotal(),
       requested_path: path
     };
   }
@@ -493,8 +533,8 @@ export class CommunicationServer {
     if (!success) {
       throw new Error(`Failed to delete agent '${agent_id}'`);
     }
-    
-    return {
+            
+            return {
       agent_id: agent_id,
       status: 'deleted',
       message: 'Agent and all associated data have been deleted'
@@ -502,15 +542,28 @@ export class CommunicationServer {
   }
 
   private async handleSend(args: any): Promise<any> {
-    // Support both old and new protocol
+    // Support both old and new protocol; require session for authenticated send
     const { 
       to_agent_id, to_agent_name, title, content, from_agent_id, routing_type, security_level,
       // Backward compatibility
-      to_path, to_agent, from_path
+      to_path, to_agent, from_path,
+      // Session
+      session_token
     } = args;
-    
-    if (!title || !content) {
-      throw new Error('Title and content are required');
+            
+            if (!title || !content) {
+              throw new Error('Title and content are required');
+            }
+
+    // Validate session if provided (recommended)
+    if (session_token) {
+      const session = this.db.getSession(session_token);
+      if (!session || !session.isActive || session.expiresAt < new Date()) {
+        throw new Error('Invalid or expired session_token');
+      }
+      if (from_agent_id && session.agentId !== from_agent_id) {
+        throw new Error('session_token does not belong to from_agent_id');
+      }
     }
 
     // Validate sender
@@ -522,12 +575,8 @@ export class CommunicationServer {
         throw new Error(`Sender agent '${from_agent_id}' not found`);
       }
       sender = foundSender;
-    } else if (from_path) {
-      // Backward compatibility: use workspace path
-      const senderWorkspace = this.resolveWorkspacePath(from_path);
-      sender = await this.getOrCreateAgent(senderWorkspace);
     } else {
-      throw new Error('Either from_agent_id (new protocol) or from_path (legacy) is required');
+      throw new Error('from_agent_id is required');
     }
     
     // Find recipient agent(s)
@@ -549,19 +598,8 @@ export class CommunicationServer {
     } else if (routing_type) {
       // New protocol: route based on type
       recipients = this.routeMessageByType(routing_type, args);
-    } else if (to_path && to_agent) {
-      // Backward compatibility: use workspace path and agent name
-      const foundRecipient = this.db.getAgentByNameAndWorkspace(to_agent, to_path);
-      if (!foundRecipient) {
-        throw new Error(`Agent '${to_agent}' not found in workspace '${to_path}'`);
-      }
-      recipients = [foundRecipient];
-    } else if (to_path) {
-      // Backward compatibility: use workspace path only
-      const recipient = await this.getOrCreateAgent(to_path);
-      recipients = [recipient];
     } else {
-      throw new Error('Recipient specification required: to_agent_id, to_agent_name, routing_type, or to_path');
+      throw new Error('Recipient specification required: to_agent_id, to_agent_name, or routing_type');
     }
     
     // Send message to all recipients
@@ -569,15 +607,15 @@ export class CommunicationServer {
     
     for (const recipient of recipients) {
       // Create conversation and message
-      const conversation = createConversation(title, [sender.id, recipient.id], sender.id);
-      this.db.createConversation(conversation);
-      
-      const message = createMessage(
-        conversation.id,
-        sender.id,
-        recipient.id,
-        title,
-        content,
+            const conversation = createConversation(title, [sender.id, recipient.id], sender.id);
+            this.db.createConversation(conversation);
+            
+            const message = createMessage(
+              conversation.id,
+              sender.id,
+              recipient.id,
+              title,
+              content,
         args.priority || MessagePriority.NORMAL,
         undefined,
         undefined,
@@ -594,19 +632,19 @@ export class CommunicationServer {
       message.metadata = metadata;
       
       // Add agent information
-      message.fromAgentName = sender.name;
-      message.fromAgentRole = sender.role;
-      message.toAgentName = recipient.name;
-      message.toAgentRole = recipient.role;
-      
-      const messageId = this.db.createMessage(message);
-      
+            message.fromAgentName = sender.name;
+            message.fromAgentRole = sender.role;
+            message.toAgentName = recipient.name;
+            message.toAgentRole = recipient.role;
+            
+            const messageId = this.db.createMessage(message);
+            
       results.push({
-        message_id: messageId,
+                    message_id: messageId,
         to_agent_id: recipient.id,
         to_agent_name: recipient.name,
         to_address: getAgentIdentifier(recipient),
-        subject: title,
+                    subject: title,
         status: 'sent',
         routing_type: message.metadata.routingType,
         security_level: message.metadata.securityLevel
@@ -620,7 +658,7 @@ export class CommunicationServer {
   }
 
   private async handleCheckMailbox(args: any): Promise<any> {
-    const { limit = 50, agent_id, from_path } = args;
+    const { limit = 50, agent_id, from_path, session_token } = args;
     
     if (limit < 1 || limit > 500) {
       throw new Error('Limit must be between 1 and 500');
@@ -629,6 +667,12 @@ export class CommunicationServer {
     let sender: Agent;
     
     if (agent_id) {
+      if (session_token) {
+        const session = this.db.getSession(session_token);
+        if (!session || !session.isActive || session.expiresAt < new Date() || session.agentId !== agent_id) {
+          throw new Error('Invalid or expired session for given agent_id');
+        }
+      }
       // New protocol: use agent ID
       const foundSender = this.db.getAgent(agent_id);
       if (!foundSender) {
@@ -638,7 +682,7 @@ export class CommunicationServer {
       console.log('✅ Using agent by ID:', sender.id, sender.name);
     } else if (from_path) {
       // Backward compatibility: use workspace path
-      const senderWorkspace = this.resolveWorkspacePath(from_path);
+            const senderWorkspace = this.resolveWorkspacePath(from_path);
       
       // Try to find existing agents in this workspace first
       const existingAgents = this.db.getAgentsByWorkspace(senderWorkspace);
@@ -671,49 +715,61 @@ export class CommunicationServer {
     
     this.db.updateAgentLastSeen(sender.id);
     
-    const messages = this.db.getMessagesForAgent(sender.id, limit);
-    const allMessages = this.db.getMessagesForAgent(sender.id, 10000);
-    const totalMessages = allMessages.length;
-    const hasMore = totalMessages > limit;
-    
-    const result = messages.map(msg => {
-      const fromAgent = this.db.getAgent(msg.fromAgent);
-      const toAgent = this.db.getAgent(msg.toAgent);
-      
-      return {
-        id: msg.id,
+            const messages = this.db.getMessagesForAgent(sender.id, limit);
+            const allMessages = this.db.getMessagesForAgent(sender.id, 10000);
+            const totalMessages = allMessages.length;
+            const hasMore = totalMessages > limit;
+            
+            const result = messages.map(msg => {
+              const fromAgent = this.db.getAgent(msg.fromAgent);
+              const toAgent = this.db.getAgent(msg.toAgent);
+              
+              return {
+                id: msg.id,
         from_agent: fromAgent ? fromAgent.name : 'Unknown',
         from_address: fromAgent ? getAgentIdentifier(fromAgent) : 'Unknown',
         to_agent: toAgent ? toAgent.name : 'Unknown',
         to_address: toAgent ? getAgentIdentifier(toAgent) : 'Unknown',
-        subject: msg.subject,
-        content: msg.content.length > 100 ? msg.content.substring(0, 100) + '...' : msg.content,
-        created_at: msg.createdAt.toISOString(),
-        state: msg.state,
-        is_read: msg.isRead
-      };
-    });
-    
-    return {
-      messages: result,
-      count: result.length,
-      total_messages: totalMessages,
-      has_more: hasMore,
-      limit_requested: limit
+                subject: msg.subject,
+                content: msg.content.length > 100 ? msg.content.substring(0, 100) + '...' : msg.content,
+                created_at: msg.createdAt.toISOString(),
+                state: msg.state,
+                is_read: msg.isRead
+              };
+            });
+            
+            return {
+                    messages: result,
+                    count: result.length,
+                    total_messages: totalMessages,
+                    has_more: hasMore,
+                    limit_requested: limit
     };
   }
 
   private async handleListMessages(args: any): Promise<any> {
-    const { tail = 10, from_path } = args;
+    const { tail = 10, agent_id, session_token } = args;
     
     if (tail < 1 || tail > 100) {
       throw new Error('tail must be between 1 and 100');
     }
 
-    const senderWorkspace = this.resolveWorkspacePath(from_path);
-    const sender = await this.getOrCreateAgent(senderWorkspace);
+    if (!agent_id) {
+      throw new Error('agent_id is required');
+    }
+    if (session_token) {
+      const session = this.db.getSession(session_token);
+      if (!session || !session.isActive || session.expiresAt < new Date() || session.agentId !== agent_id) {
+        throw new Error('Invalid or expired session for given agent_id');
+      }
+    }
+
+    const agent = this.db.getAgent(agent_id);
+    if (!agent) {
+      throw new Error(`Agent '${agent_id}' not found`);
+    }
     
-    const messages = this.db.getMessagesForAgent(sender.id, tail);
+    const messages = this.db.getMessagesForAgent(agent.id, tail);
     
     const result = messages.map(msg => ({
       id: msg.id,
@@ -732,16 +788,27 @@ export class CommunicationServer {
   }
 
   private async handleQueryMessages(args: any): Promise<any> {
-    const { query, from_path } = args;
+    const { query, agent_id, session_token } = args;
     
     if (!query) {
       throw new Error('Search query is required');
     }
+    if (!agent_id) {
+      throw new Error('agent_id is required');
+    }
+    if (session_token) {
+      const session = this.db.getSession(session_token);
+      if (!session || !session.isActive || session.expiresAt < new Date() || session.agentId !== agent_id) {
+        throw new Error('Invalid or expired session for given agent_id');
+      }
+    }
 
-    const senderWorkspace = this.resolveWorkspacePath(from_path);
-    const sender = await this.getOrCreateAgent(senderWorkspace);
+    const agent = this.db.getAgent(agent_id);
+    if (!agent) {
+      throw new Error(`Agent '${agent_id}' not found`);
+    }
     
-    const messages = this.db.searchMessages(sender.id, query, 50);
+    const messages = this.db.searchMessages(agent.id, query, 50);
     
     const result = messages.map(msg => ({
       id: msg.id,
@@ -761,28 +828,40 @@ export class CommunicationServer {
   }
 
   private async handleLabelMessages(args: any): Promise<any> {
-    const { id, label, from_path } = args;
-    
-    const validLabels = ['sent', 'arrived', 'replied', 'ignored', 'read', 'unread'];
-    if (!validLabels.includes(label)) {
-      throw new Error(`Invalid label '${label}'. Must be one of: ${validLabels.join(', ')}`);
-    }
+    const { id, label, agent_id, session_token } = args;
+            
+            const validLabels = ['sent', 'arrived', 'replied', 'ignored', 'read', 'unread'];
+            if (!validLabels.includes(label)) {
+              throw new Error(`Invalid label '${label}'. Must be one of: ${validLabels.join(', ')}`);
+            }
 
-    const message = this.db.getMessage(id);
-    if (!message) {
-      throw new Error(`Message '${id}' not found`);
-    }
+            const message = this.db.getMessage(id);
+            if (!message) {
+              throw new Error(`Message '${id}' not found`);
+            }
 
-    const senderWorkspace = this.resolveWorkspacePath(from_path);
-    const sender = await this.getOrCreateAgent(senderWorkspace);
-    
-    if (message.fromAgent !== sender.id && message.toAgent !== sender.id) {
-      throw new Error('You can only label messages in your mailbox');
-    }
+            if (!agent_id) {
+              throw new Error('agent_id is required');
+            }
+            if (session_token) {
+              const session = this.db.getSession(session_token);
+              if (!session || !session.isActive || session.expiresAt < new Date() || session.agentId !== agent_id) {
+                throw new Error('Invalid or expired session for given agent_id');
+              }
+            }
 
-    const oldState = message.state;
-    const readAt = label === 'read' ? new Date() : undefined;
-    
+            const agent = this.db.getAgent(agent_id);
+            if (!agent) {
+              throw new Error(`Agent '${agent_id}' not found`);
+            }
+            
+            if (message.fromAgent !== agent.id && message.toAgent !== agent.id) {
+              throw new Error('You can only label messages in your mailbox');
+            }
+
+            const oldState = message.state;
+            const readAt = label === 'read' ? new Date() : undefined;
+            
     this.db.updateMessageState(id, label as MessageState);
     
     if (label === 'read') {
@@ -790,28 +869,40 @@ export class CommunicationServer {
     } else if (label === 'unread') {
       this.db.updateMessageReadStatus(id, false);
     }
-    
-    return {
-      message_id: id,
-      old_state: oldState,
-      new_state: label,
-      status: 'labeled',
-      read_at: readAt?.toISOString()
-    };
-  }
+            
+            return {
+                    message_id: id,
+                    old_state: oldState,
+                    new_state: label,
+                    status: 'labeled',
+                    read_at: readAt?.toISOString()
+            };
+          }
 
   // New bulk mailbox operation handlers
   private async handleBulkMarkRead(args: any): Promise<any> {
-    const { from_path, message_ids } = args;
-    
+    const { agent_id, session_token, message_ids } = args;
+            
     if (!message_ids || !Array.isArray(message_ids) || message_ids.length === 0) {
       throw new Error('message_ids array is required and must not be empty');
-    }
+            }
 
-    const senderWorkspace = this.resolveWorkspacePath(from_path);
-    const sender = await this.getOrCreateAgent(senderWorkspace);
-    
-    const updatedCount = this.db.bulkMarkMessagesAsRead(sender.id, message_ids);
+            if (!agent_id) {
+              throw new Error('agent_id is required');
+            }
+            if (session_token) {
+              const session = this.db.getSession(session_token);
+              if (!session || !session.isActive || session.expiresAt < new Date() || session.agentId !== agent_id) {
+                throw new Error('Invalid or expired session for given agent_id');
+              }
+            }
+
+            const agent = this.db.getAgent(agent_id);
+            if (!agent) {
+              throw new Error(`Agent '${agent_id}' not found`);
+            }
+            
+    const updatedCount = this.db.bulkMarkMessagesAsRead(agent.id, message_ids);
     
     return {
       updated_count: updatedCount,
@@ -821,18 +912,30 @@ export class CommunicationServer {
   }
 
   private async handleBulkMarkUnread(args: any): Promise<any> {
-    const { from_path, message_ids } = args;
+    const { agent_id, session_token, message_ids } = args;
     
     if (!message_ids || !Array.isArray(message_ids) || message_ids.length === 0) {
       throw new Error('message_ids array is required and must not be empty');
     }
 
-    const senderWorkspace = this.resolveWorkspacePath(from_path);
-    const sender = await this.getOrCreateAgent(senderWorkspace);
+    if (!agent_id) {
+      throw new Error('agent_id is required');
+    }
+    if (session_token) {
+      const session = this.db.getSession(session_token);
+      if (!session || !session.isActive || session.expiresAt < new Date() || session.agentId !== agent_id) {
+        throw new Error('Invalid or expired session for given agent_id');
+      }
+    }
+
+    const agent = this.db.getAgent(agent_id);
+    if (!agent) {
+      throw new Error(`Agent '${agent_id}' not found`);
+    }
     
-    const updatedCount = this.db.bulkMarkMessagesAsUnread(sender.id, message_ids);
-    
-    return {
+    const updatedCount = this.db.bulkMarkMessagesAsUnread(agent.id, message_ids);
+            
+            return {
       updated_count: updatedCount,
       message_ids: message_ids,
       status: 'marked_as_unread'
@@ -840,7 +943,7 @@ export class CommunicationServer {
   }
 
   private async handleBulkUpdateStates(args: any): Promise<any> {
-    const { from_path, message_ids, new_state } = args;
+    const { agent_id, session_token, message_ids, new_state } = args;
     
     if (!message_ids || !Array.isArray(message_ids) || message_ids.length === 0) {
       throw new Error('message_ids array is required and must not be empty');
@@ -851,10 +954,22 @@ export class CommunicationServer {
       throw new Error(`Invalid state '${new_state}'. Must be one of: ${validStates.join(', ')}`);
     }
 
-    const senderWorkspace = this.resolveWorkspacePath(from_path);
-    const sender = await this.getOrCreateAgent(senderWorkspace);
+    if (!agent_id) {
+      throw new Error('agent_id is required');
+    }
+    if (session_token) {
+      const session = this.db.getSession(session_token);
+      if (!session || !session.isActive || session.expiresAt < new Date() || session.agentId !== agent_id) {
+        throw new Error('Invalid or expired session for given agent_id');
+      }
+    }
+
+    const agent = this.db.getAgent(agent_id);
+    if (!agent) {
+      throw new Error(`Agent '${agent_id}' not found`);
+    }
     
-    const updatedCount = this.db.bulkUpdateMessageStates(sender.id, { messageIds: message_ids, newState: new_state as MessageState });
+    const updatedCount = this.db.bulkUpdateMessageStates(agent.id, { messageIds: message_ids, newState: new_state as MessageState });
     
     return {
       updated_count: updatedCount,
@@ -865,16 +980,28 @@ export class CommunicationServer {
   }
 
   private async handleDeleteMessages(args: any): Promise<any> {
-    const { from_path, message_ids } = args;
+    const { agent_id, session_token, message_ids } = args;
     
     if (!message_ids || !Array.isArray(message_ids) || message_ids.length === 0) {
       throw new Error('message_ids array is required and must not be empty');
     }
 
-    const senderWorkspace = this.resolveWorkspacePath(from_path);
-    const sender = await this.getOrCreateAgent(senderWorkspace);
-    
-    const deletedCount = this.db.deleteMessages(sender.id, message_ids);
+            if (!agent_id) {
+              throw new Error('agent_id is required');
+            }
+            if (session_token) {
+              const session = this.db.getSession(session_token);
+              if (!session || !session.isActive || session.expiresAt < new Date() || session.agentId !== agent_id) {
+                throw new Error('Invalid or expired session for given agent_id');
+              }
+            }
+
+            const agent = this.db.getAgent(agent_id);
+            if (!agent) {
+              throw new Error(`Agent '${agent_id}' not found`);
+            }
+            
+    const deletedCount = this.db.deleteMessages(agent.id, message_ids);
     
     return {
       deleted_count: deletedCount,
@@ -884,14 +1011,26 @@ export class CommunicationServer {
   }
 
   private async handleEmptyMailbox(args: any): Promise<any> {
-    const { from_path, query } = args;
+    const { agent_id, session_token, query } = args;
 
-    const senderWorkspace = this.resolveWorkspacePath(from_path);
-    const sender = await this.getOrCreateAgent(senderWorkspace);
+    if (!agent_id) {
+      throw new Error('agent_id is required');
+    }
+    if (session_token) {
+      const session = this.db.getSession(session_token);
+      if (!session || !session.isActive || session.expiresAt < new Date() || session.agentId !== agent_id) {
+        throw new Error('Invalid or expired session for given agent_id');
+      }
+    }
+
+    const agent = this.db.getAgent(agent_id);
+    if (!agent) {
+      throw new Error(`Agent '${agent_id}' not found`);
+    }
     
-    const deletedCount = this.db.emptyMailbox(sender.id, query);
-    
-    return {
+    const deletedCount = this.db.emptyMailbox(agent.id, query);
+            
+            return {
       deleted_count: deletedCount,
       query: query || 'all messages',
       status: 'mailbox_emptied'
@@ -900,11 +1039,24 @@ export class CommunicationServer {
 
   // Existing handler methods (simplified versions)
   private async handleGetMessageStats(args: any): Promise<any> {
-    const { from_path } = args;
-    const senderWorkspace = this.resolveWorkspacePath(from_path);
-    const sender = await this.getOrCreateAgent(senderWorkspace);
+    const { agent_id, session_token } = args;
+    
+    if (!agent_id) {
+      throw new Error('agent_id is required');
+    }
+    if (session_token) {
+      const session = this.db.getSession(session_token);
+      if (!session || !session.isActive || session.expiresAt < new Date() || session.agentId !== agent_id) {
+        throw new Error('Invalid or expired session for given agent_id');
+      }
+    }
 
-    const messages = this.db.getMessagesForAgent(sender.id, 1000);
+    const agent = this.db.getAgent(agent_id);
+    if (!agent) {
+      throw new Error(`Agent '${agent_id}' not found`);
+    }
+
+    const messages = this.db.getMessagesForAgent(agent.id, 1000);
     const totalMessages = messages.length;
     const totalSent = messages.filter(msg => msg.state === MessageState.SENT).length;
     const totalArrived = messages.filter(msg => msg.state === MessageState.ARRIVED).length;
@@ -925,125 +1077,182 @@ export class CommunicationServer {
   }
 
   private async handleGetServerHealth(args: any): Promise<any> {
-    const uptime = Date.now() - this.startTime.getTime();
-    
-    let dbHealthy = false;
-    try {
-      this.db.getDatabaseStats();
-      dbHealthy = true;
-    } catch (error) {
-      console.error('Database health check failed:', error);
-    }
-    
-    const perfStats = this.getPerformanceStats();
-    
+            const uptime = Date.now() - this.startTime.getTime();
+            
+            let dbHealthy = false;
+            try {
+              this.db.getDatabaseStats();
+              dbHealthy = true;
+            } catch (error) {
+              console.error('Database health check failed:', error);
+            }
+            
+            const perfStats = this.getPerformanceStats();
+            
     return {
-      status: dbHealthy ? 'healthy' : 'degraded',
-      uptime_seconds: Math.floor(uptime / 1000),
-      uptime_formatted: new Date(uptime).toISOString().substr(11, 8),
-      database_healthy: dbHealthy,
-      request_count: this.requestCount,
-      error_count: this.errorCount,
-      error_rate: Math.round((this.errorCount / Math.max(this.requestCount, 1)) * 100 * 100) / 100,
-      performance: perfStats
-    };
+              status: dbHealthy ? 'healthy' : 'degraded',
+              uptime_seconds: Math.floor(uptime / 1000),
+              uptime_formatted: new Date(uptime).toISOString().substr(11, 8),
+              database_healthy: dbHealthy,
+              request_count: this.requestCount,
+              error_count: this.errorCount,
+              error_rate: Math.round((this.errorCount / Math.max(this.requestCount, 1)) * 100 * 100) / 100,
+              performance: perfStats
+            };
   }
 
   private async handleGetUnreadCount(args: any): Promise<any> {
-    const { from_path } = args;
-    const senderWorkspace = this.resolveWorkspacePath(from_path);
-    const sender = await this.getOrCreateAgent(senderWorkspace);
+    const { agent_id, session_token } = args;
     
-    const messages = this.db.getMessagesForAgent(sender.id, 1000);
-    const unreadCount = messages.filter(msg => !msg.isRead && msg.toAgent === sender.id).length;
+    if (!agent_id) {
+      throw new Error('agent_id is required');
+    }
+    if (session_token) {
+      const session = this.db.getSession(session_token);
+      if (!session || !session.isActive || session.expiresAt < new Date() || session.agentId !== agent_id) {
+        throw new Error('Invalid or expired session for given agent_id');
+      }
+    }
+
+    const agent = this.db.getAgent(agent_id);
+    if (!agent) {
+      throw new Error(`Agent '${agent_id}' not found`);
+    }
+    
+    const messages = this.db.getMessagesForAgent(agent.id, 1000);
+    const unreadCount = messages.filter(msg => !msg.isRead && msg.toAgent === agent.id).length;
     const totalMessages = messages.length;
     const unreadPercentage = Math.round((unreadCount / Math.max(totalMessages, 1)) * 100 * 10) / 10;
-    
-    return {
-      unread_count: unreadCount,
-      total_messages: totalMessages,
-      unread_percentage: unreadPercentage
-    };
-  }
+            
+            return {
+                    unread_count: unreadCount,
+                    total_messages: totalMessages,
+                    unread_percentage: unreadPercentage
+            };
+          }
 
   private async handleViewConversationLog(args: any): Promise<any> {
-    const { from_path } = args;
-    const senderWorkspace = this.resolveWorkspacePath(from_path);
-    const sender = await this.getOrCreateAgent(senderWorkspace);
-    const messages = this.db.getMessagesForAgent(sender.id, 50);
+    const { agent_id, session_token } = args;
     
-    const conversations = messages.map(msg => ({
-      conversation_id: msg.conversationId,
-      subject: msg.subject,
-      participants: [msg.fromAgent, msg.toAgent],
-      participant_names: [msg.fromAgentName || 'Unknown', msg.toAgentName || 'Unknown'],
-      message_count: 1,
-      first_message_at: msg.createdAt.toISOString(),
-      last_message_at: msg.createdAt.toISOString(),
-      last_message_content: msg.content.substring(0, 200),
-      conversation_state: 'active',
-      created_at: msg.createdAt.toISOString()
-    }));
-    
-    return {
-      status: 'success',
-      organize_result: {
-        conversations_organized: conversations.length,
-        log_file: 'conversation_log.json'
-      },
-      log_data: {
-        metadata: {
-          generated_at: new Date().toISOString(),
-          total_conversations: conversations.length
-        },
-        conversations: conversations
+    if (!agent_id) {
+      throw new Error('agent_id is required');
+    }
+    if (session_token) {
+      const session = this.db.getSession(session_token);
+      if (!session || !session.isActive || session.expiresAt < new Date() || session.agentId !== agent_id) {
+        throw new Error('Invalid or expired session for given agent_id');
       }
-    };
-  }
+    }
+
+    const agent = this.db.getAgent(agent_id);
+    if (!agent) {
+      throw new Error(`Agent '${agent_id}' not found`);
+    }
+    const messages = this.db.getMessagesForAgent(agent.id, 50);
+            
+            const conversations = messages.map(msg => ({
+              conversation_id: msg.conversationId,
+              subject: msg.subject,
+              participants: [msg.fromAgent, msg.toAgent],
+              participant_names: [msg.fromAgentName || 'Unknown', msg.toAgentName || 'Unknown'],
+              message_count: 1,
+              first_message_at: msg.createdAt.toISOString(),
+              last_message_at: msg.createdAt.toISOString(),
+              last_message_content: msg.content.substring(0, 200),
+              conversation_state: 'active',
+              created_at: msg.createdAt.toISOString()
+            }));
+            
+            return {
+                    status: 'success',
+                    organize_result: {
+                      conversations_organized: conversations.length,
+                      log_file: 'conversation_log.json'
+                    },
+                    log_data: {
+                      metadata: {
+                        generated_at: new Date().toISOString(),
+                        total_conversations: conversations.length
+                      },
+                      conversations: conversations
+                    }
+            };
+          }
 
   private async handleGetConversationStats(args: any): Promise<any> {
-    const { from_path } = args;
-    const senderWorkspace = this.resolveWorkspacePath(from_path);
-    const sender = await this.getOrCreateAgent(senderWorkspace);
-    const messages = this.db.getMessagesForAgent(sender.id, 1000);
+    const { agent_id, session_token } = args;
     
-    const totalMessages = messages.length;
-    const totalConversations = new Set(messages.map(m => m.conversationId)).size;
+    if (!agent_id) {
+      throw new Error('agent_id is required');
+    }
+    if (session_token) {
+      const session = this.db.getSession(session_token);
+      if (!session || !session.isActive || session.expiresAt < new Date() || session.agentId !== agent_id) {
+        throw new Error('Invalid or expired session for given agent_id');
+      }
+    }
+
+    const agent = this.db.getAgent(agent_id);
+    if (!agent) {
+      throw new Error(`Agent '${agent_id}' not found`);
+    }
+    const messages = this.db.getMessagesForAgent(agent.id, 1000);
+            
+            const totalMessages = messages.length;
+            const totalConversations = new Set(messages.map(m => m.conversationId)).size;
     const activeConversations = totalConversations;
     const recentConversations = totalConversations;
     const completedConversations = 0;
-    const avgMessagesPerConversation = totalConversations > 0 ? Math.round((totalMessages / totalConversations) * 100) / 100 : 0;
-    
-    return {
-      total_conversations: totalConversations,
-      active_conversations: activeConversations,
-      recent_conversations: recentConversations,
-      completed_conversations: completedConversations,
-      total_messages: totalMessages,
-      avg_messages_per_conversation: avgMessagesPerConversation
+            const avgMessagesPerConversation = totalConversations > 0 ? Math.round((totalMessages / totalConversations) * 100) / 100 : 0;
+            
+            return {
+                    total_conversations: totalConversations,
+                    active_conversations: activeConversations,
+                    recent_conversations: recentConversations,
+                    completed_conversations: completedConversations,
+                    total_messages: totalMessages,
+                    avg_messages_per_conversation: avgMessagesPerConversation
     };
   }
 
   private async handleSendPriorityMessage(args: any): Promise<any> {
-    const { to_path, to_agent, title, content, from_path, priority, expires_in_hours } = args;
+    const { to_agent_id, to_agent_name, title, content, from_agent_id, session_token, priority, expires_in_hours } = args;
 
     if (!title || !content) {
       throw new Error('Title and content are required for priority messages');
     }
 
+    if (!from_agent_id) {
+      throw new Error('from_agent_id is required');
+    }
+    if (session_token) {
+      const session = this.db.getSession(session_token);
+      if (!session || !session.isActive || session.expiresAt < new Date() || session.agentId !== from_agent_id) {
+        throw new Error('Invalid or expired session for given from_agent_id');
+      }
+    }
+
+    const sender = this.db.getAgent(from_agent_id);
+    if (!sender) {
+      throw new Error(`Sender agent '${from_agent_id}' not found`);
+    }
+
     let recipient: Agent;
-    if (to_agent) {
-      const foundRecipient = this.db.getAgentByNameAndWorkspace(to_agent, to_path);
+    if (to_agent_id) {
+      const foundRecipient = this.db.getAgent(to_agent_id);
       if (!foundRecipient) {
-        throw new Error(`Agent '${to_agent}' not found in workspace '${to_path}'`);
+        throw new Error(`Recipient agent '${to_agent_id}' not found`);
+      }
+      recipient = foundRecipient;
+    } else if (to_agent_name) {
+      const foundRecipient = this.db.getAgentByName(to_agent_name);
+      if (!foundRecipient) {
+        throw new Error(`Agent '${to_agent_name}' not found`);
       }
       recipient = foundRecipient;
     } else {
-      recipient = await this.getOrCreateAgent(to_path);
+      throw new Error('Either to_agent_id or to_agent_name is required');
     }
-
-    const senderWorkspace = this.resolveWorkspacePath(from_path);
-    const sender = await this.getOrCreateAgent(senderWorkspace);
 
     const conversation = createConversation(title, [sender.id, recipient.id], sender.id);
     this.db.createConversation(conversation);
@@ -1073,7 +1282,7 @@ export class CommunicationServer {
     return {
       message_id: messageId,
       to_agent: recipient.name,
-      to_path: to_path,
+      to_agent_id: recipient.id,
       to_address: getAgentIdentifier(recipient),
       subject: title,
       status: 'sent'
@@ -1085,6 +1294,17 @@ export class CommunicationServer {
     return {
       cleaned_count: cleanedCount,
       status: 'success'
+    };
+  }
+
+  private async handleCleanupGhostAgents(args: any): Promise<any> {
+    const { days = 7, no_messages_only = true } = args || {};
+    const report = this.db.cleanupGhostAgents(days, no_messages_only);
+    return {
+      deleted: report.deleted,
+      agent_ids: report.agentIds,
+      days,
+      no_messages_only
     };
   }
 
@@ -1125,7 +1345,7 @@ export class CommunicationServer {
             }
           ];
           break;
-        default:
+          default:
           throw new Error(`Unknown template type: ${template_type}`);
       }
     } else {
@@ -1181,6 +1401,12 @@ export class CommunicationServer {
         let result: any;
         
         switch (name) {
+          case 'login':
+            result = await this.handleLogin(args);
+            break;
+          case 'logout':
+            result = await this.handleLogout(args);
+            break;
           case 'create_agent':
             result = await this.handleCreateAgent(args);
             break;
@@ -1262,6 +1488,9 @@ export class CommunicationServer {
           case 'cleanup_expired_messages':
             result = await this.handleCleanupExpiredMessages(args);
             break;
+          case 'cleanup_ghost_agents':
+            result = await this.handleCleanupGhostAgents(args);
+            break;
           case 'get_message_templates':
             result = await this.handleGetMessageTemplates(args);
             this.setCachedResponse(cacheKey, result);
@@ -1285,6 +1514,42 @@ export class CommunicationServer {
     this.server.setRequestHandler(ListToolsRequestSchema, async () => {
       return {
         tools: [
+          {
+            name: 'cleanup_ghost_agents',
+            description: 'Find and clean up inactive (ghost) agents by last_seen and message count',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                days: { type: 'number', description: 'Inactivity threshold in days', default: 7, minimum: 1, maximum: 365 },
+                no_messages_only: { type: 'boolean', description: 'Only delete agents with zero messages', default: true }
+              }
+            }
+          },
+          {
+            name: 'login',
+            description: 'Authenticate an agent and start a per-chat session. Returns a session_token bound to agent_id for use in send/check_mailbox.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                agent_id: { type: 'string', description: 'Agent ID to authenticate' },
+                username: { type: 'string', description: 'Username for the agent' },
+                password: { type: 'string', description: 'Password for the agent' },
+                session_minutes: { type: 'number', description: 'Session duration in minutes (auto-expires). Default 30.', default: 30, minimum: 1, maximum: 240 }
+              },
+              required: ['agent_id','username','password']
+            }
+          },
+          {
+            name: 'logout',
+            description: 'End a session. Prefer passing session_token to revoke a specific session. Or pass agent_id to invalidate all sessions for that agent.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                session_token: { type: 'string', description: 'Session token to invalidate' },
+                agent_id: { type: 'string', description: 'Agent ID to invalidate all sessions for' }
+              }
+            }
+          },
           {
             name: 'create_agent',
             description: 'Create a new agent with user-assigned ID for inter-agent communication',
@@ -1346,44 +1611,45 @@ export class CommunicationServer {
           },
           {
             name: 'send',
-            description: 'Send a message using the new agent identification protocol',
+            description: 'Send a message using agent IDs. Requires login and session_token for authentication.',
             inputSchema: {
               type: 'object',
               properties: {
+                session_token: {
+                  type: 'string',
+                  description: 'Session token from login (recommended). Must belong to from_agent_id if provided.'
+                },
                 to_agent_id: {
                   type: 'string',
-                  description: 'Direct agent ID to send message to',
+                  description: 'Direct agent ID to send message to (new protocol)',
                   examples: ['comm-server-agent', 'supervisor', 'voicewriter-audio-agent']
                 },
                 to_agent_name: {
                   type: 'string',
-                  description: 'Agent name to send message to (if agent_id not provided)',
+                  description: 'Agent name to send message to (if agent_id not provided). Uses first active match.',
                   examples: ['Communication Server Agent', 'VoiceWriter Supervisor', 'VoiceWriter Audio Agent']
                 },
                 routing_type: {
                   type: 'string',
                   enum: ['direct', 'broadcast', 'role_based', 'capability_based', 'tag_based'],
-                  description: 'Message routing type',
+                  description: 'Message routing type. direct routes to one; broadcast sends to all; role/capability/tag filter targets.',
                   examples: ['direct', 'broadcast', 'role_based']
                 },
                 target_role: {
                   type: 'string',
-                  description: 'Target role for role-based routing',
-                  examples: ['developer', 'coordinator', 'supervisor']
+                  description: 'Target role for role-based routing (e.g., developer, supervisor, coordinator)'
                 },
                 target_capability: {
                   type: 'string',
-                  description: 'Target capability for capability-based routing',
-                  examples: ['communication', 'development', 'testing']
+                  description: 'Target capability for capability-based routing (e.g., communication, testing, ui)'
                 },
                 target_tag: {
                   type: 'string',
-                  description: 'Target tag for tag-based routing',
-                  examples: ['frontend', 'backend', 'urgent']
+                  description: 'Target tag for tag-based routing (e.g., frontend, urgent)'
                 },
                 from_agent_id: {
                   type: 'string',
-                  description: 'Sender agent ID (required)',
+                  description: 'Sender agent ID (new protocol). Must match session_token owner if session_token is provided.',
                   examples: ['comm-server-agent', 'supervisor']
                 },
                 title: {
@@ -1408,7 +1674,7 @@ export class CommunicationServer {
                 security_level: {
                   type: 'string',
                   enum: ['none', 'basic', 'signed', 'encrypted'],
-                  description: 'Message security level',
+                  description: 'Message security level: none/basic/signed/encrypted. signed/encrypted are placeholders for future crypto.',
                   default: 'basic',
                   examples: ['basic', 'signed']
                 }
@@ -1418,20 +1684,18 @@ export class CommunicationServer {
           },
           {
             name: 'check_mailbox',
-            description: 'Check mailbox for messages (supports both new protocol with agent_id and legacy with from_path)',
+            description: 'List messages for an agent. Requires agent_id and optional session_token for authentication.',
             inputSchema: {
               type: 'object',
               properties: {
                 agent_id: {
                   type: 'string',
-                  description: 'Agent ID to check mailbox for (new protocol)',
+                  description: 'Agent ID to check mailbox for',
                   examples: ['comm-server-agent', 'supervisor', 'voicewriter-audio-agent']
                 },
-                from_path: {
+                session_token: {
                   type: 'string',
-                  description: 'Workspace path for legacy protocol',
-                  pattern: '^/.*',
-                  examples: ['/data/communication_server/communication-server', '/data/voicewriter']
+                  description: 'Session token from login. If provided, must belong to agent_id.'
                 },
                 limit: {
                   type: 'number',
@@ -1451,11 +1715,14 @@ export class CommunicationServer {
             inputSchema: {
               type: 'object',
               properties: {
-                from_path: {
+                agent_id: {
                   type: 'string',
-                  description: 'Absolute path for the agent\'s workspace to list messages',
-                  pattern: '^/.*',
-                  examples: ['/data/communication_server/communication-server', '/home/user/projects/frontend']
+                  description: 'Agent ID to list messages for',
+                  examples: ['comm-server-agent', 'supervisor', 'voicewriter-audio-agent']
+                },
+                session_token: {
+                  type: 'string',
+                  description: 'Session token from login. If provided, must belong to agent_id.'
                 },
                 tail: {
                   type: 'number',
@@ -1466,7 +1733,7 @@ export class CommunicationServer {
                   examples: [5, 10, 20]
                 }
               },
-              required: ['from_path']
+              required: ['agent_id']
             }
           },
           {
