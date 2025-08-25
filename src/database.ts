@@ -158,37 +158,45 @@ export class DatabaseManager {
       CREATE TABLE IF NOT EXISTS agents (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
-        api_key TEXT NOT NULL,
-        email TEXT,
+        display_name TEXT,
         role TEXT NOT NULL DEFAULT 'general',
-        workspace_path TEXT,
-        address TEXT,
+        capabilities TEXT,
+        tags TEXT,
+        version TEXT DEFAULT '1.0.0',
+        signature TEXT,
+        public_key TEXT,
+        
+        -- Authentication
+        username TEXT UNIQUE,
+        password_hash TEXT,
+        salt TEXT,
+        login_attempts INTEGER DEFAULT 0,
+        locked_until TEXT,
+        last_login TEXT,
+        
+        -- Session and status
         created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
         last_seen TEXT,
         is_active INTEGER NOT NULL DEFAULT 1,
         
-        -- Simple authentication: ID, PW, ADDRESS
-        username TEXT,
-        password_hash TEXT,
-        salt TEXT,
-        last_login TEXT,
-        login_attempts INTEGER DEFAULT 0,
-        locked_until TEXT,
+        -- Metadata
+        metadata TEXT,
         
-        -- Additional metadata
-        display_name TEXT,
+        -- Backward compatibility fields
+        workspace_path TEXT,
         description TEXT,
-        capabilities TEXT,
-        tags TEXT,
-        version TEXT,
+        api_key TEXT,
+        email TEXT,
+        address TEXT,
         created_by TEXT
       );
 
       CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
         conversation_id TEXT NOT NULL,
-        from_agent TEXT NOT NULL,
-        to_agent TEXT NOT NULL,
+        from_agent_id TEXT NOT NULL,
+        to_agent_id TEXT NOT NULL,
         subject TEXT NOT NULL,
         content TEXT NOT NULL,
         state TEXT NOT NULL DEFAULT 'sent',
@@ -201,13 +209,24 @@ export class DatabaseManager {
         archived_at TEXT,
         is_read INTEGER NOT NULL DEFAULT 0,
         requires_reply INTEGER NOT NULL DEFAULT 1,
+        
+        -- Agent information (cached for performance)
         from_agent_name TEXT,
         from_agent_role TEXT,
-        from_agent_workspace TEXT,
         to_agent_name TEXT,
         to_agent_role TEXT,
-        to_agent_workspace TEXT,
-        metadata TEXT
+        
+        -- Protocol metadata
+        routing_type TEXT DEFAULT 'direct',
+        security_level TEXT DEFAULT 'basic',
+        signature TEXT,
+        metadata TEXT,
+        
+        -- Backward compatibility fields
+        from_agent TEXT,
+        to_agent TEXT,
+        from_agent_workspace TEXT,
+        to_agent_workspace TEXT
       );
 
       CREATE TABLE IF NOT EXISTS conversations (
@@ -932,6 +951,36 @@ export class DatabaseManager {
 
   close(): void {
     this.db.close();
+  }
+
+  getAgentByName(name: string): Agent | null {
+    const stmt = this.db.prepare('SELECT * FROM agents WHERE name = ? AND is_active = 1');
+    const row = stmt.get(name) as any;
+    return row ? this.mapRowToAgent(row) : null;
+  }
+
+  getAllActiveAgents(): Agent[] {
+    const stmt = this.db.prepare('SELECT * FROM agents WHERE is_active = 1 ORDER BY created_at');
+    const rows = stmt.all() as any[];
+    return rows.map(row => this.mapRowToAgent(row));
+  }
+
+  getAgentsByRole(role: string): Agent[] {
+    const stmt = this.db.prepare('SELECT * FROM agents WHERE role = ? AND is_active = 1 ORDER BY created_at');
+    const rows = stmt.all(role) as any[];
+    return rows.map(row => this.mapRowToAgent(row));
+  }
+
+  getAgentsByCapability(capability: string): Agent[] {
+    const stmt = this.db.prepare('SELECT * FROM agents WHERE capabilities LIKE ? AND is_active = 1 ORDER BY created_at');
+    const rows = stmt.all(`%${capability}%`) as any[];
+    return rows.map(row => this.mapRowToAgent(row));
+  }
+
+  getAgentsByTag(tag: string): Agent[] {
+    const stmt = this.db.prepare('SELECT * FROM agents WHERE tags LIKE ? AND is_active = 1 ORDER BY created_at');
+    const rows = stmt.all(`%${tag}%`) as any[];
+    return rows.map(row => this.mapRowToAgent(row));
   }
 
   // Helper method to map database row to Agent object

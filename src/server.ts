@@ -20,6 +20,16 @@ import {
   getAgentShortId,
   MessageTemplates
 } from './models.js';
+import {
+  AgentIdentity,
+  AgentRegistry,
+  CommunicationProtocol,
+  AgentDiscovery,
+  MessageProtocol,
+  ROUTING_RULES,
+  SECURITY_LEVELS,
+  PROTOCOL_VERSION
+} from './protocol.js';
 import { v4 as uuidv4 } from 'uuid';
 import { createHash } from 'crypto';
 import { execSync } from 'child_process';
@@ -221,6 +231,37 @@ export class CommunicationServer {
       throw new Error('Unable to determine a valid workspace path');
     }
     return cwd;
+  }
+
+  private routeMessageByType(routingType: string, args: any): Agent[] {
+    switch (routingType) {
+      case ROUTING_RULES.BROADCAST:
+        return this.db.getAllActiveAgents();
+        
+      case ROUTING_RULES.ROLE_BASED:
+        const role = args.target_role;
+        if (!role) {
+          throw new Error('target_role is required for role-based routing');
+        }
+        return this.db.getAgentsByRole(role);
+        
+      case ROUTING_RULES.CAPABILITY_BASED:
+        const capability = args.target_capability;
+        if (!capability) {
+          throw new Error('target_capability is required for capability-based routing');
+        }
+        return this.db.getAgentsByCapability(capability);
+        
+      case ROUTING_RULES.TAG_BASED:
+        const tag = args.target_tag;
+        if (!tag) {
+          throw new Error('target_tag is required for tag-based routing');
+        }
+        return this.db.getAgentsByTag(tag);
+        
+      default:
+        throw new Error(`Unknown routing type: ${routingType}`);
+    }
   }
 
   private logRequest(toolName: string, success: boolean, error?: string, duration?: number): void {
@@ -461,101 +502,174 @@ export class CommunicationServer {
   }
 
   private async handleSend(args: any): Promise<any> {
-    const { to_path, to_agent, title, content, from_path } = args;
+    // Support both old and new protocol
+    const { 
+      to_agent_id, to_agent_name, title, content, from_agent_id, routing_type, security_level,
+      // Backward compatibility
+      to_path, to_agent, from_path
+    } = args;
     
     if (!title || !content) {
       throw new Error('Title and content are required');
     }
 
-    // Get or create recipient agent
-    let recipient: Agent;
-    if (to_agent) {
+    // Validate sender
+    let sender: Agent;
+    if (from_agent_id) {
+      // New protocol: use agent ID
+      const foundSender = this.db.getAgent(from_agent_id);
+      if (!foundSender) {
+        throw new Error(`Sender agent '${from_agent_id}' not found`);
+      }
+      sender = foundSender;
+    } else if (from_path) {
+      // Backward compatibility: use workspace path
+      const senderWorkspace = this.resolveWorkspacePath(from_path);
+      sender = await this.getOrCreateAgent(senderWorkspace);
+    } else {
+      throw new Error('Either from_agent_id (new protocol) or from_path (legacy) is required');
+    }
+    
+    // Find recipient agent(s)
+    let recipients: Agent[];
+    if (to_agent_id) {
+      // New protocol: direct message to specific agent
+      const recipient = this.db.getAgent(to_agent_id);
+      if (!recipient) {
+        throw new Error(`Recipient agent '${to_agent_id}' not found`);
+      }
+      recipients = [recipient];
+    } else if (to_agent_name) {
+      // New protocol: find by name
+      const recipient = this.db.getAgentByName(to_agent_name);
+      if (!recipient) {
+        throw new Error(`Agent '${to_agent_name}' not found`);
+      }
+      recipients = [recipient];
+    } else if (routing_type) {
+      // New protocol: route based on type
+      recipients = this.routeMessageByType(routing_type, args);
+    } else if (to_path && to_agent) {
+      // Backward compatibility: use workspace path and agent name
       const foundRecipient = this.db.getAgentByNameAndWorkspace(to_agent, to_path);
       if (!foundRecipient) {
         throw new Error(`Agent '${to_agent}' not found in workspace '${to_path}'`);
       }
-      recipient = foundRecipient;
+      recipients = [foundRecipient];
+    } else if (to_path) {
+      // Backward compatibility: use workspace path only
+      const recipient = await this.getOrCreateAgent(to_path);
+      recipients = [recipient];
     } else {
-      recipient = await this.getOrCreateAgent(to_path);
+      throw new Error('Recipient specification required: to_agent_id, to_agent_name, routing_type, or to_path');
     }
     
-    // Get or create sender agent
-    const senderWorkspace = this.resolveWorkspacePath(from_path);
-    const sender = await this.getOrCreateAgent(senderWorkspace);
+    // Send message to all recipients
+    const results = [];
     
-    // Create conversation and message
-    const conversation = createConversation(title, [sender.id, recipient.id], sender.id);
-    this.db.createConversation(conversation);
-    
-    const message = createMessage(
-      conversation.id,
-      sender.id,
-      recipient.id,
-      title,
-      content,
-      MessagePriority.NORMAL,
-      undefined,
-      undefined,
-      true,
-      {}
-    );
-    
-    // Add sender information
-    message.fromAgentName = sender.name;
-    message.fromAgentRole = sender.role;
-    message.fromAgentWorkspace = sender.workspacePath;
-    message.toAgentName = recipient.name;
-    message.toAgentRole = recipient.role;
-    message.toAgentWorkspace = recipient.workspacePath;
-    
-    const messageId = this.db.createMessage(message);
+    for (const recipient of recipients) {
+      // Create conversation and message
+      const conversation = createConversation(title, [sender.id, recipient.id], sender.id);
+      this.db.createConversation(conversation);
+      
+      const message = createMessage(
+        conversation.id,
+        sender.id,
+        recipient.id,
+        title,
+        content,
+        args.priority || MessagePriority.NORMAL,
+        undefined,
+        undefined,
+        true,
+        {}
+      );
+      
+      // Add protocol metadata to message metadata
+      const metadata = {
+        routingType: routing_type || ROUTING_RULES.DIRECT,
+        securityLevel: security_level || SECURITY_LEVELS.BASIC,
+        ...message.metadata
+      };
+      message.metadata = metadata;
+      
+      // Add agent information
+      message.fromAgentName = sender.name;
+      message.fromAgentRole = sender.role;
+      message.toAgentName = recipient.name;
+      message.toAgentRole = recipient.role;
+      
+      const messageId = this.db.createMessage(message);
+      
+      results.push({
+        message_id: messageId,
+        to_agent_id: recipient.id,
+        to_agent_name: recipient.name,
+        to_address: getAgentIdentifier(recipient),
+        subject: title,
+        status: 'sent',
+        routing_type: message.metadata.routingType,
+        security_level: message.metadata.securityLevel
+      });
+    }
     
     return {
-      message_id: messageId,
-      to_agent: recipient.name,
-      to_path: to_path,
-      to_address: getAgentIdentifier(recipient),
-      subject: title,
-      status: 'sent'
+      sent_count: results.length,
+      messages: results
     };
   }
 
   private async handleCheckMailbox(args: any): Promise<any> {
-    const { limit = 50, from_path } = args;
+    const { limit = 50, agent_id, from_path } = args;
     
     if (limit < 1 || limit > 500) {
       throw new Error('Limit must be between 1 and 500');
     }
 
-    const senderWorkspace = this.resolveWorkspacePath(from_path);
-    
-    // Try to find existing agents in this workspace first
-    const existingAgents = this.db.getAgentsByWorkspace(senderWorkspace);
     let sender: Agent;
     
-    console.log('🔍 Debug: Found', existingAgents.length, 'agents in workspace:', senderWorkspace);
-    existingAgents.forEach(agent => {
-      console.log('  - Agent:', agent.id, agent.name, agent.role);
-    });
-    
-    if (existingAgents.length > 0) {
-      // Use the first existing agent (preferably the main one)
-      const mainAgent = existingAgents.find(agent => 
-        agent.name === 'Communication Server Agent'
-      ) || existingAgents.find(agent => 
-        agent.role === 'coordinator'
-      ) || existingAgents.find(agent => 
-        agent.name === 'Default Agent'
-      ) || existingAgents[0];
+    if (agent_id) {
+      // New protocol: use agent ID
+      const foundSender = this.db.getAgent(agent_id);
+      if (!foundSender) {
+        throw new Error(`Agent '${agent_id}' not found`);
+      }
+      sender = foundSender;
+      console.log('✅ Using agent by ID:', sender.id, sender.name);
+    } else if (from_path) {
+      // Backward compatibility: use workspace path
+      const senderWorkspace = this.resolveWorkspacePath(from_path);
       
-      sender = mainAgent;
-      console.log('✅ Using existing agent:', sender.id, sender.name);
-      this.db.updateAgentLastSeen(sender.id);
+      // Try to find existing agents in this workspace first
+      const existingAgents = this.db.getAgentsByWorkspace(senderWorkspace);
+      
+      console.log('🔍 Debug: Found', existingAgents.length, 'agents in workspace:', senderWorkspace);
+      existingAgents.forEach(agent => {
+        console.log('  - Agent:', agent.id, agent.name, agent.role);
+      });
+      
+      if (existingAgents.length > 0) {
+        // Use the first existing agent (preferably the main one)
+        const mainAgent = existingAgents.find(agent => 
+          agent.name === 'Communication Server Agent'
+        ) || existingAgents.find(agent => 
+          agent.role === 'coordinator'
+        ) || existingAgents.find(agent => 
+          agent.name === 'Default Agent'
+        ) || existingAgents[0];
+        
+        sender = mainAgent;
+        console.log('✅ Using existing agent:', sender.id, sender.name);
+      } else {
+        // Create new agent if none exist
+        sender = await this.getOrCreateAgent(senderWorkspace);
+        console.log('🆕 Created new agent:', sender.id, sender.name);
+      }
     } else {
-      // Create new agent if none exist
-      sender = await this.getOrCreateAgent(senderWorkspace);
-      console.log('🆕 Created new agent:', sender.id, sender.name);
+      throw new Error('Either agent_id (new protocol) or from_path (legacy) is required');
     }
+    
+    this.db.updateAgentLastSeen(sender.id);
     
     const messages = this.db.getMessagesForAgent(sender.id, limit);
     const allMessages = this.db.getMessagesForAgent(sender.id, 10000);
@@ -1232,26 +1346,45 @@ export class CommunicationServer {
           },
           {
             name: 'send',
-            description: 'Send a message to an agent in the specified directory',
+            description: 'Send a message using the new agent identification protocol',
             inputSchema: {
               type: 'object',
               properties: {
-                to_path: {
+                to_agent_id: {
                   type: 'string',
-                  description: 'Absolute path to the target project directory where you want to send the message',
-                  pattern: '^/.*',
-                  examples: ['/data/communication_server/communication-server', '/home/user/projects/frontend']
+                  description: 'Direct agent ID to send message to',
+                  examples: ['comm-server-agent', 'supervisor', 'voicewriter-audio-agent']
                 },
-                to_agent: {
+                to_agent_name: {
                   type: 'string',
-                  description: 'Optional specific agent name to send to. If not provided, sends to the first available agent',
-                  examples: ['Frontend Agent', 'Backend Agent', 'Test Agent']
+                  description: 'Agent name to send message to (if agent_id not provided)',
+                  examples: ['Communication Server Agent', 'VoiceWriter Supervisor', 'VoiceWriter Audio Agent']
                 },
-                from_path: {
+                routing_type: {
                   type: 'string',
-                  description: 'Optional absolute path for the sender project. Defaults to current working directory',
-                  pattern: '^/.*',
-                  examples: ['/home/user/projects/backend', '/data/communication_server/communication-server']
+                  enum: ['direct', 'broadcast', 'role_based', 'capability_based', 'tag_based'],
+                  description: 'Message routing type',
+                  examples: ['direct', 'broadcast', 'role_based']
+                },
+                target_role: {
+                  type: 'string',
+                  description: 'Target role for role-based routing',
+                  examples: ['developer', 'coordinator', 'supervisor']
+                },
+                target_capability: {
+                  type: 'string',
+                  description: 'Target capability for capability-based routing',
+                  examples: ['communication', 'development', 'testing']
+                },
+                target_tag: {
+                  type: 'string',
+                  description: 'Target tag for tag-based routing',
+                  examples: ['frontend', 'backend', 'urgent']
+                },
+                from_agent_id: {
+                  type: 'string',
+                  description: 'Sender agent ID (required)',
+                  examples: ['comm-server-agent', 'supervisor']
                 },
                 title: {
                   type: 'string',
@@ -1264,22 +1397,41 @@ export class CommunicationServer {
                   description: 'The main body of your message (max 10,000 chars)',
                   minLength: 1,
                   examples: ['Can you help integrate the new API endpoints?', 'I found a bug in the authentication system.', 'The analysis is ready for review.']
+                },
+                priority: {
+                  type: 'string',
+                  enum: ['low', 'normal', 'high', 'urgent'],
+                  description: 'Message priority level',
+                  default: 'normal',
+                  examples: ['normal', 'high', 'urgent']
+                },
+                security_level: {
+                  type: 'string',
+                  enum: ['none', 'basic', 'signed', 'encrypted'],
+                  description: 'Message security level',
+                  default: 'basic',
+                  examples: ['basic', 'signed']
                 }
               },
-              required: ['to_path', 'title', 'content']
+              required: ['title', 'content']
             }
           },
           {
             name: 'check_mailbox',
-            description: 'Check mailbox for messages with detailed information',
+            description: 'Check mailbox for messages (supports both new protocol with agent_id and legacy with from_path)',
             inputSchema: {
               type: 'object',
               properties: {
+                agent_id: {
+                  type: 'string',
+                  description: 'Agent ID to check mailbox for (new protocol)',
+                  examples: ['comm-server-agent', 'supervisor', 'voicewriter-audio-agent']
+                },
                 from_path: {
                   type: 'string',
-                  description: 'Absolute path for the agent\'s workspace to check mailbox',
+                  description: 'Workspace path for legacy protocol',
                   pattern: '^/.*',
-                  examples: ['/data/communication_server/communication-server', '/home/user/projects/frontend']
+                  examples: ['/data/communication_server/communication-server', '/data/voicewriter']
                 },
                 limit: {
                   type: 'number',
@@ -1290,7 +1442,7 @@ export class CommunicationServer {
                   examples: [10, 50, 100]
                 }
               },
-              required: ['from_path']
+              required: []
             }
           },
           {
