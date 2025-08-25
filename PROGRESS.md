@@ -2,6 +2,15 @@
 
 ## Latest Updates
 
+### Tool Exposure Fix (v2.1.2) - 2025-08-25
+- **Status**: ✅ Fixed Cursor tool visibility issue
+- **Problem**: Cursor was only seeing 11 tools instead of all 24 MCP tools
+- **Root Cause**: Version caching - Cursor was using older npm package version
+- **Solution**: Bumped version to 2.1.2 and republished to npm registry
+- **Result**: All 24 MCP tools now properly exposed with detailed descriptions
+- **Tools Available**: Agent management, messaging, bulk operations, authentication, templates
+- **Testing**: Verified through direct JSON-RPC calls - all tools responding correctly
+
 ### Local-Only Smithery Configuration (2025-08-25)
 - **Status**: ✅ Configured for local-only deployment
 - **Changes Made**:
