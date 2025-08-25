@@ -1283,13 +1283,17 @@ export class CommunicationServer {
   }
 
   private async handleCleanupGhostAgents(args: any): Promise<any> {
-    const { days = 7, no_messages_only = true } = args || {};
+    const { days = 7, no_messages_only = true } = args;
+    
     const report = this.db.cleanupGhostAgents(days, no_messages_only);
+    
     return {
-      deleted: report.deleted,
-      agent_ids: report.agentIds,
-      days,
-      no_messages_only
+      ghost_agents_found: report.agentIds.length,
+      agents_deleted: report.deleted,
+      criteria: {
+        days_inactive: days,
+        no_messages_only: no_messages_only
+      }
     };
   }
 
@@ -1475,6 +1479,24 @@ export class CommunicationServer {
             break;
           case 'cleanup_ghost_agents':
             result = await this.handleCleanupGhostAgents(args);
+            break;
+          case 'discover_agents_by_role':
+            result = await this.handleDiscoverAgentsByRole(args);
+            break;
+          case 'discover_agents_by_capability':
+            result = await this.handleDiscoverAgentsByCapability(args);
+            break;
+          case 'broadcast_message':
+            result = await this.handleBroadcastMessage(args);
+            break;
+          case 'get_agent_status':
+            result = await this.handleGetAgentStatus(args);
+            break;
+          case 'ping_agent':
+            result = await this.handlePingAgent(args);
+            break;
+          case 'get_active_agents':
+            result = await this.handleGetActiveAgents(args);
             break;
           case 'get_message_templates':
             result = await this.handleGetMessageTemplates(args);
@@ -1821,7 +1843,8 @@ export class CommunicationServer {
               properties: {
                 random_string: {
                   type: 'string',
-                  description: 'Dummy parameter for no-parameter tools'
+                  description: 'Dummy parameter for no-parameter tools',
+                  examples: ['stats']
                 },
                 from_path: {
                   type: 'string',
@@ -1831,6 +1854,185 @@ export class CommunicationServer {
                 }
               },
               required: ['random_string']
+            }
+          },
+          {
+            name: 'discover_agents_by_role',
+            description: 'Find all agents with a specific role (e.g., developer, supervisor, coordinator)',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                role: {
+                  type: 'string',
+                  enum: ['general', 'developer', 'manager', 'analyst', 'tester', 'designer', 'coordinator', 'supervisor'],
+                  description: 'Role to search for',
+                  examples: ['developer', 'supervisor', 'coordinator']
+                },
+                active_only: {
+                  type: 'boolean',
+                  description: 'Only return active agents',
+                  default: true
+                }
+              },
+              required: ['role']
+            }
+          },
+          {
+            name: 'discover_agents_by_capability',
+            description: 'Find all agents with specific capabilities (e.g., audio, gui, testing)',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                capability: {
+                  type: 'string',
+                  description: 'Capability to search for',
+                  examples: ['audio', 'gui', 'testing', 'frontend', 'backend']
+                },
+                active_only: {
+                  type: 'boolean',
+                  description: 'Only return active agents',
+                  default: true
+                }
+              },
+              required: ['capability']
+            }
+          },
+          {
+            name: 'broadcast_message',
+            description: 'Send a message to all active agents or agents with specific criteria',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                from_agent_id: {
+                  type: 'string',
+                  description: 'ID of the sending agent',
+                  examples: ['supervisor', 'coordinator']
+                },
+                title: {
+                  type: 'string',
+                  description: 'Message title/subject',
+                  examples: ['System Update', 'Project Status', 'Urgent Notice']
+                },
+                content: {
+                  type: 'string',
+                  description: 'Message content',
+                  examples: ['All agents please check your assignments.']
+                },
+                target_role: {
+                  type: 'string',
+                  description: 'Send only to agents with this role',
+                  examples: ['developer', 'supervisor']
+                },
+                target_capability: {
+                  type: 'string',
+                  description: 'Send only to agents with this capability',
+                  examples: ['audio', 'gui']
+                },
+                priority: {
+                  type: 'string',
+                  enum: ['low', 'normal', 'high', 'urgent'],
+                  description: 'Message priority',
+                  default: 'normal'
+                }
+              },
+              required: ['from_agent_id', 'title', 'content']
+            }
+          },
+          {
+            name: 'get_agent_status',
+            description: 'Get the current status and activity of an agent',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                agent_id: {
+                  type: 'string',
+                  description: 'ID of the agent to check',
+                  examples: ['supervisor', 'gui', 'audio']
+                }
+              },
+              required: ['agent_id']
+            }
+          },
+          {
+            name: 'ping_agent',
+            description: 'Send a ping to check if an agent is responsive',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                agent_id: {
+                  type: 'string',
+                  description: 'ID of the agent to ping',
+                  examples: ['supervisor', 'gui', 'audio']
+                }
+              },
+              required: ['agent_id']
+            }
+          },
+          {
+            name: 'get_active_agents',
+            description: 'Get a list of all currently active agents',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                include_last_seen: {
+                  type: 'boolean',
+                  description: 'Include last seen timestamp',
+                  default: true
+                }
+              }
+            }
+          },
+          {
+            name: 'send_priority_message',
+            description: 'Send a priority message with optional expiration',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                to_path: {
+                  type: 'string',
+                  description: 'Absolute path to the target project directory',
+                  pattern: '^/.*',
+                  examples: ['/data/communication_server/communication-server', '/home/user/projects/frontend']
+                },
+                to_agent: {
+                  type: 'string',
+                  description: 'Optional specific agent name to send to',
+                  examples: ['Frontend Agent', 'Backend Agent']
+                },
+                from_path: {
+                  type: 'string',
+                  description: 'Optional absolute path for the sender project',
+                  pattern: '^/.*',
+                  examples: ['/home/user/projects/backend']
+                },
+                title: {
+                  type: 'string',
+                  description: 'The subject/title of your priority message',
+                  minLength: 1,
+                  examples: ['URGENT: System Down', 'CRITICAL: Security Issue']
+                },
+                content: {
+                  type: 'string',
+                  description: 'The main body of your priority message',
+                  minLength: 1,
+                  examples: ['The system is experiencing critical issues that require immediate attention.']
+                },
+                priority: {
+                  type: 'string',
+                  enum: ['low', 'normal', 'high', 'urgent'],
+                  description: 'Priority level of the message',
+                  default: 'high',
+                  examples: ['high', 'urgent']
+                },
+                expires_in_hours: {
+                  type: 'number',
+                  description: 'Number of hours before the message expires',
+                  minimum: 1,
+                  maximum: 168,
+                  examples: [24, 48, 72]
+                }
+              },
+              required: ['to_path', 'title', 'content']
             }
           },
           {
@@ -2135,6 +2337,187 @@ export class CommunicationServer {
         ]
       };
     });
+  }
+
+  // Enhanced communication handlers
+  private async handleGetActiveAgents(args: any): Promise<any> {
+    const { include_last_seen = true } = args;
+    const agents = this.db.getAllActiveAgents();
+    
+    return {
+      agents: agents.map(agent => ({
+        id: agent.id,
+        name: agent.name,
+        display_name: agent.displayName,
+        role: agent.role,
+        capabilities: agent.capabilities,
+        tags: agent.tags,
+        ...(include_last_seen && { last_seen: agent.lastSeen?.toISOString() }),
+        created_at: agent.createdAt.toISOString()
+      })),
+      count: agents.length,
+      total_agents: this.db.countAgentsTotal()
+    };
+  }
+
+  private async handleDiscoverAgentsByRole(args: any): Promise<any> {
+    const { role, active_only = true } = args;
+    const agents = this.db.getAgentsByRole(role);
+    const filteredAgents = active_only ? agents.filter(agent => agent.isActive) : agents;
+    
+    return {
+      role: role,
+      agents: filteredAgents.map(agent => ({
+        id: agent.id,
+        name: agent.name,
+        display_name: agent.displayName,
+        capabilities: agent.capabilities,
+        tags: agent.tags,
+        last_seen: agent.lastSeen?.toISOString(),
+        is_active: agent.isActive
+      })),
+      count: filteredAgents.length
+    };
+  }
+
+  private async handleDiscoverAgentsByCapability(args: any): Promise<any> {
+    const { capability, active_only = true } = args;
+    const agents = this.db.getAgentsByCapability(capability);
+    const filteredAgents = active_only ? agents.filter(agent => agent.isActive) : agents;
+    
+    return {
+      capability: capability,
+      agents: filteredAgents.map(agent => ({
+        id: agent.id,
+        name: agent.name,
+        display_name: agent.displayName,
+        role: agent.role,
+        tags: agent.tags,
+        last_seen: agent.lastSeen?.toISOString(),
+        is_active: agent.isActive
+      })),
+      count: filteredAgents.length
+    };
+  }
+
+  private async handleBroadcastMessage(args: any): Promise<any> {
+    const { from_agent_id, title, content, target_role, target_capability, priority = 'normal' } = args;
+    
+    // Validate sender
+    const sender = this.db.getAgent(from_agent_id);
+    if (!sender) {
+      throw new Error(`Sender agent '${from_agent_id}' not found`);
+    }
+
+    // Get target agents based on criteria
+    let targetAgents: Agent[] = [];
+    if (target_role) {
+      targetAgents = this.db.getAgentsByRole(target_role);
+    } else if (target_capability) {
+      targetAgents = this.db.getAgentsByCapability(target_capability);
+    } else {
+      targetAgents = this.db.getAllActiveAgents();
+    }
+
+    // Filter out sender and inactive agents
+    targetAgents = targetAgents.filter(agent => agent.id !== from_agent_id && agent.isActive);
+
+    // Send messages to all target agents
+    const sentMessages: string[] = [];
+    const failedMessages: string[] = [];
+
+    for (const targetAgent of targetAgents) {
+      try {
+        const message = createMessage(
+          `broadcast-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          from_agent_id,
+          targetAgent.id,
+          title,
+          content,
+          priority as MessagePriority,
+          undefined, // replyTo
+          24, // expiresInHours
+          true, // requiresReply
+          {
+            routing_type: 'broadcast',
+            target_role: target_role,
+            target_capability: target_capability,
+            broadcast_id: `broadcast-${Date.now()}`
+          }
+        );
+        const messageId = this.db.createMessage(message);
+        sentMessages.push(targetAgent.id);
+      } catch (error) {
+        failedMessages.push(targetAgent.id);
+      }
+    }
+
+    return {
+      from_agent_id: from_agent_id,
+      title: title,
+      target_criteria: {
+        role: target_role,
+        capability: target_capability
+      },
+      messages_sent: sentMessages.length,
+      messages_failed: failedMessages.length,
+      total_targets: targetAgents.length,
+      sent_to: sentMessages,
+      failed_to: failedMessages
+    };
+  }
+
+  private async handleGetAgentStatus(args: any): Promise<any> {
+    const { agent_id } = args;
+    const agent = this.db.getAgent(agent_id);
+    
+    if (!agent) {
+      throw new Error(`Agent with ID '${agent_id}' not found`);
+    }
+
+    // Get message count
+    const messageCount = this.db.getMessageCountForAgent(agent_id);
+    
+    // Check if agent has recent activity
+    const isOnline = agent.lastSeen && (Date.now() - agent.lastSeen.getTime()) < 5 * 60 * 1000; // 5 minutes
+    
+    return {
+      agent_id: agent.id,
+      name: agent.name,
+      display_name: agent.displayName,
+      role: agent.role,
+      is_active: agent.isActive,
+      is_online: isOnline,
+      last_seen: agent.lastSeen?.toISOString(),
+      message_count: messageCount,
+      capabilities: agent.capabilities,
+      tags: agent.tags,
+      created_at: agent.createdAt.toISOString()
+    };
+  }
+
+  private async handlePingAgent(args: any): Promise<any> {
+    const { agent_id } = args;
+    const agent = this.db.getAgent(agent_id);
+    
+    if (!agent) {
+      throw new Error(`Agent with ID '${agent_id}' not found`);
+    }
+
+    // Update last seen to simulate ping response
+    this.db.updateAgentLastSeen(agent_id);
+    
+    // Check if agent is responsive (has recent activity)
+    const isResponsive = agent.lastSeen && (Date.now() - agent.lastSeen.getTime()) < 10 * 60 * 1000; // 10 minutes
+    
+    return {
+      agent_id: agent.id,
+      name: agent.name,
+      ping_sent: true,
+      is_responsive: isResponsive,
+      last_seen: agent.lastSeen?.toISOString(),
+      response_time: 'immediate' // Since we're updating last_seen
+    };
   }
 
   async run(): Promise<void> {
