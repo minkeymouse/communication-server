@@ -36,6 +36,9 @@ export class DatabaseManager {
     this.db.pragma('temp_store = MEMORY');
     this.db.pragma('mmap_size = 268435456'); // 256MB
 
+    // Check if we need to migrate the database schema
+    this.migrateDatabase();
+
     // Create agents table
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS agents (
@@ -141,6 +144,8 @@ export class DatabaseManager {
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_agents_workspace_path ON agents(workspace_path)');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_agents_api_key ON agents(api_key)');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_agents_active ON agents(is_active)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_agents_name_workspace ON agents(name, workspace_path)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_agents_created_at ON agents(created_at_epoch)');
 
     // Indexes for conversations table
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_conversations_created_by ON conversations(created_by)');
@@ -154,6 +159,8 @@ export class DatabaseManager {
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_messages_state ON messages(state)');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_messages_requires_reply ON messages(requires_reply)');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_messages_reply_to ON messages(reply_to)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at_epoch)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_messages_subject_content ON messages(subject, content)');
 
     // Indexes for logs table
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level)');
@@ -175,28 +182,90 @@ export class DatabaseManager {
     }
   }
 
+  private migrateDatabase(): void {
+    try {
+      // Check if workspace_path has UNIQUE constraint (old schema)
+      const pragmaResult = this.db.pragma('table_info(agents)') as any[];
+      const workspacePathColumn = pragmaResult.find(col => col.name === 'workspace_path');
+      
+      if (workspacePathColumn) {
+        // Check if there's a UNIQUE constraint on workspace_path
+        const indexResult = this.db.pragma('index_list(agents)') as any[];
+        const uniqueIndex = indexResult.find(idx => 
+          idx.name && idx.name.includes('workspace_path') && idx.unique === 1
+        );
+        
+        if (uniqueIndex) {
+          console.log('🔄 Migrating database schema: Removing UNIQUE constraint on workspace_path');
+          
+          // Create a temporary table without the UNIQUE constraint
+          this.db.exec(`
+            CREATE TABLE agents_new (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              api_key TEXT NOT NULL UNIQUE,
+              email TEXT,
+              role TEXT DEFAULT 'general',
+              workspace_path TEXT,
+              address TEXT,
+              created_at TEXT NOT NULL,
+              last_seen TEXT,
+              is_active BOOLEAN DEFAULT 1,
+              created_at_epoch INTEGER DEFAULT (strftime('%s', 'now'))
+            )
+          `);
+          
+          // Copy data from old table to new table
+          this.db.exec('INSERT INTO agents_new SELECT * FROM agents');
+          
+          // Drop old table and rename new table
+          this.db.exec('DROP TABLE agents');
+          this.db.exec('ALTER TABLE agents_new RENAME TO agents');
+          
+          // Recreate indexes
+          this.createIndexes();
+          
+          console.log('✅ Database migration completed successfully');
+        }
+      }
+    } catch (error) {
+      console.warn('Database migration failed:', error);
+    }
+  }
+
   // Agent operations
   createAgent(agent: Agent): string {
-    const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO agents 
-      (id, name, api_key, email, role, workspace_path, address, created_at, last_seen, is_active)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+    try {
+      const stmt = this.db.prepare(`
+        INSERT INTO agents 
+        (id, name, api_key, email, role, workspace_path, address, created_at, last_seen, is_active)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
 
-    const result = stmt.run(
-      agent.id,
-      agent.name,
-      agent.apiKey,
-      agent.email || null,
-      agent.role,
-      agent.workspacePath || null,
-      agent.address || null,
-      agent.createdAt.toISOString(),
-      agent.lastSeen ? agent.lastSeen.toISOString() : null,
-      agent.isActive ? 1 : 0
-    );
+      const result = stmt.run(
+        agent.id,
+        agent.name,
+        agent.apiKey,
+        agent.email || null,
+        agent.role,
+        agent.workspacePath || null,
+        agent.address || null,
+        agent.createdAt.toISOString(),
+        agent.lastSeen ? agent.lastSeen.toISOString() : null,
+        agent.isActive ? 1 : 0
+      );
 
-    return agent.id;
+      return agent.id;
+    } catch (error: any) {
+      // If agent already exists, return the existing agent ID
+      if (error.code === 'SQLITE_CONSTRAINT' && error.message.includes('UNIQUE constraint failed')) {
+        const existingAgent = this.getAgentByNameAndWorkspace(agent.name, agent.workspacePath || '');
+        if (existingAgent) {
+          return existingAgent.id;
+        }
+      }
+      throw error;
+    }
   }
 
   getAgent(agentId: string): Agent | null {
@@ -424,15 +493,20 @@ export class DatabaseManager {
   searchMessages(agentId: string, query: string, limit: number = 50): Message[] {
     const stmt = this.db.prepare(`
       SELECT * FROM messages 
-      WHERE (from_agent = ? OR to_agent = ?) 
-      AND (subject LIKE ? OR content LIKE ?)
-      ORDER BY created_at DESC
+      WHERE (from_agent = ? OR to_agent = ?)
+      AND (
+        subject LIKE ? OR 
+        content LIKE ? OR
+        from_agent_name LIKE ? OR
+        to_agent_name LIKE ?
+      )
+      ORDER BY created_at DESC 
       LIMIT ?
     `);
-
-    const searchPattern = `%${query}%`;
-    const rows = stmt.all(agentId, agentId, searchPattern, searchPattern, limit) as any[];
     
+    const searchPattern = `%${query}%`;
+    const rows = stmt.all(agentId, agentId, searchPattern, searchPattern, searchPattern, searchPattern, limit) as any[];
+
     return rows.map(row => ({
       id: row.id,
       conversationId: row.conversation_id,
@@ -458,19 +532,14 @@ export class DatabaseManager {
     }));
   }
 
-  updateMessageState(messageId: string, newState: string, readAt?: Date): void {
-    const stmt = this.db.prepare(`
-      UPDATE messages 
-      SET state = ?, read_at = ?, is_read = ?
-      WHERE id = ?
-    `);
+  updateMessageState(messageId: string, state: MessageState): void {
+    const stmt = this.db.prepare('UPDATE messages SET state = ? WHERE id = ?');
+    stmt.run(state, messageId);
+  }
 
-    stmt.run(
-      newState,
-      readAt ? readAt.toISOString() : null,
-      newState === 'read' ? 1 : 0,
-      messageId
-    );
+  updateMessageReadStatus(messageId: string, isRead: boolean): void {
+    const stmt = this.db.prepare('UPDATE messages SET is_read = ?, read_at = ? WHERE id = ?');
+    stmt.run(isRead ? 1 : 0, isRead ? new Date().toISOString() : null, messageId);
   }
 
   // Log operations

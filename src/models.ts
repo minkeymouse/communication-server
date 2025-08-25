@@ -205,3 +205,33 @@ String.prototype.hashCode = function(): number {
   }
   return hash;
 };
+
+// Message templates for common use cases
+export const MessageTemplates = {
+  BUG_REPORT: {
+    title: "Bug Report",
+    content: "I found a bug in the system. Please investigate and fix it."
+  },
+  FEATURE_REQUEST: {
+    title: "Feature Request", 
+    content: "I would like to request a new feature. Please review and implement it."
+  },
+  API_INTEGRATION: {
+    title: "API Integration Request",
+    content: "I need help integrating with the API. Can you assist me?"
+  },
+  CODE_REVIEW: {
+    title: "Code Review Request",
+    content: "Please review my code changes and provide feedback."
+  },
+  DEPLOYMENT: {
+    title: "Deployment Request",
+    content: "I need help with deployment. Can you assist me?"
+  },
+  TESTING: {
+    title: "Testing Request",
+    content: "I need help with testing. Can you assist me?"
+  }
+} as const;
+
+export type MessageTemplateType = keyof typeof MessageTemplates;

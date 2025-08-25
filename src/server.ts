@@ -61,21 +61,17 @@ export class CommunicationServer {
     return cwd;
   }
 
-  private logRequest(toolName: string, success: boolean = true, error?: string, duration: number = 0): void {
+  private logRequest(toolName: string, success: boolean, error?: string, duration?: number): void {
     this.requestCount++;
     if (!success) {
       this.errorCount++;
     }
-
-    if (duration > 0) {
-      this.requestTimes.push(duration);
-      if (this.requestTimes.length > 1000) {
-        this.requestTimes.shift();
-      }
-    }
-
-    console.error(`📈 Request #${this.requestCount}: ${toolName} - ${success ? 'SUCCESS' : 'ERROR'} - ${duration.toFixed(3)}s`);
-    if (error) {
+    
+    const logMessage = `📈 Request #${this.requestCount}: ${toolName} - ${success ? 'SUCCESS' : 'ERROR'}${duration ? ` - ${duration}ms` : ''}`;
+    
+    if (success) {
+      console.log(logMessage);
+    } else {
       console.error(`❌ Error in ${toolName}: ${error}`);
     }
   }
@@ -104,7 +100,7 @@ export class CommunicationServer {
       throw new Error("Invalid workspace path. Must be an absolute path starting with '/'");
     }
 
-    // If a specific name is provided, check if that agent exists
+    // If a specific name is provided, check if that exact agent exists
     if (agentName) {
       const existingAgent = this.db.getAgentByNameAndWorkspace(agentName, workspacePath);
       if (existingAgent) {
@@ -113,7 +109,7 @@ export class CommunicationServer {
         return existingAgent;
       }
     } else {
-      // Check if any agent exists in this workspace (for backward compatibility)
+      // For backward compatibility, check if any agent exists in this workspace
       const existingAgent = this.db.getAgentByWorkspace(workspacePath);
       if (existingAgent) {
         // Update last seen
@@ -132,14 +128,26 @@ export class CommunicationServer {
     
     const agent = createAgent(defaultName, workspacePath, defaultRole, undefined, address);
     
-    const agentId = this.db.createAgent(agent);
-    const newAgent = this.db.getAgent(agentId);
-    
-    if (!newAgent) {
-      throw new Error('Failed to create agent');
+    try {
+      const agentId = this.db.createAgent(agent);
+      const newAgent = this.db.getAgent(agentId);
+      
+      if (!newAgent) {
+        throw new Error('Failed to create agent');
+      }
+      
+      return newAgent;
+    } catch (error: any) {
+      // If creation failed due to constraint, try to get existing agent
+      if (error.message.includes('UNIQUE constraint failed') || error.message.includes('FOREIGN KEY constraint failed')) {
+        const existingAgent = this.db.getAgentByNameAndWorkspace(defaultName, workspacePath);
+        if (existingAgent) {
+          this.db.updateAgentLastSeen(existingAgent.id);
+          return existingAgent;
+        }
+      }
+      throw error;
     }
-    
-    return newAgent;
   }
 
   private setupTools(): void {
@@ -201,6 +209,11 @@ export class CommunicationServer {
                   description: 'The absolute path to the target project directory where you want to send the message.',
                   pattern: '^/.*',
                   examples: ['/home/user/projects/frontend', '/workspace/api-service', '/opt/projects/machine-learning']
+                },
+                to_agent: {
+                  type: 'string',
+                  description: 'Optional specific agent name to send to. If not provided, sends to the first available agent.',
+                  examples: ['Frontend Agent', 'Backend Agent', 'Database Agent']
                 },
                 from_path: {
                   type: 'string',
@@ -419,6 +432,21 @@ export class CommunicationServer {
               },
               required: ['random_string']
             }
+          },
+          {
+            name: 'get_message_templates',
+            description: 'Get available message templates for common use cases.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                template_type: {
+                  type: 'string',
+                  description: 'Optional specific template type to get.',
+                  enum: ['BUG_REPORT', 'FEATURE_REQUEST', 'API_INTEGRATION', 'CODE_REVIEW', 'DEPLOYMENT', 'TESTING'],
+                  examples: ['BUG_REPORT', 'API_INTEGRATION']
+                }
+              }
+            }
           }
         ]
       };
@@ -444,24 +472,41 @@ export class CommunicationServer {
               }
             }
             
-            // Get or create agent with the specified name and role
-            const agent = await this.getOrCreateAgent(path, name, parsedRole);
-            
-            const duration = Date.now() - startTime;
-            this.logRequest('create_agent', true, undefined, duration);
-            
-            return {
-              content: [{
-                type: 'text',
-                text: `Agent created successfully: ${agent.name} (${agent.id}) in ${agent.workspacePath}`
-              }],
-              isError: false,
-              metadata: {
-                agent_id: agent.id,
-                name: agent.name,
-                workspace_path: agent.workspacePath,
-                status: 'created'
+            try {
+              // Get or create agent with the specified name and role
+              const agent = await this.getOrCreateAgent(path, name, parsedRole);
+              
+              const duration = Date.now() - startTime;
+              this.logRequest('create_agent', true, undefined, duration);
+              
+              return {
+                content: [{
+                  type: 'text',
+                  text: `Agent created successfully: ${agent.name} (${agent.id}) in ${agent.workspacePath}`
+                }],
+                isError: false,
+                metadata: {
+                  agent_id: agent.id,
+                  name: agent.name,
+                  workspace_path: agent.workspacePath,
+                  status: 'created'
+                }
               }
+            } catch (error: any) {
+              const duration = Date.now() - startTime;
+              this.logRequest('create_agent', false, error.message, duration);
+              
+              // Provide detailed error information
+              let errorMessage = 'Failed to create agent';
+              if (error.message.includes('FOREIGN KEY constraint failed')) {
+                errorMessage = 'Database constraint error - please try again';
+              } else if (error.message.includes('UNIQUE constraint failed')) {
+                errorMessage = 'Agent already exists with this name';
+              } else {
+                errorMessage = error.message || 'Unknown error occurred';
+              }
+              
+              throw new Error(errorMessage);
             }
           }
 
@@ -496,14 +541,25 @@ export class CommunicationServer {
           }
 
           case 'send': {
-            const { to_path, title, content, from_path } = request.params.arguments as { to_path: string; title: string; content: string; from_path?: string };
+            const { to_path, to_agent, title, content, from_path } = request.params.arguments as { to_path: string; to_agent?: string; title: string; content: string; from_path?: string };
             
             if (!title || !content) {
               throw new Error('Title and content are required');
             }
 
             // Get or create recipient agent
-            const recipient = await this.getOrCreateAgent(to_path);
+            let recipient: Agent;
+            if (to_agent) {
+              // Try to find specific agent by name and workspace
+              const foundRecipient = this.db.getAgentByNameAndWorkspace(to_agent, to_path);
+              if (!foundRecipient) {
+                throw new Error(`Agent '${to_agent}' not found in workspace '${to_path}'`);
+              }
+              recipient = foundRecipient;
+            } else {
+              // Get first available agent in the workspace (backward compatibility)
+              recipient = await this.getOrCreateAgent(to_path);
+            }
             
             // Get or create sender agent (current workspace)
             const senderWorkspace = this.resolveWorkspacePath(from_path);
@@ -533,8 +589,8 @@ export class CommunicationServer {
             
             const messageId = this.db.createMessage(message);
             
-            // Automatically mark as "arrived" for the recipient
-            this.db.updateMessageState(messageId, 'arrived');
+            // Message starts as "sent" - recipient will mark as "arrived" when they check mailbox
+            // Don't automatically mark as arrived - let the recipient handle state transitions
             
             const duration = Date.now() - startTime;
             this.logRequest('send', true, undefined, duration);
@@ -601,7 +657,7 @@ export class CommunicationServer {
             const messageId = this.db.createMessage(replyMessage);
             
             // Update original message state to "replied"
-            this.db.updateMessageState(to_message, 'replied');
+            this.db.updateMessageState(to_message, MessageState.REPLIED);
             
             const duration = Date.now() - startTime;
             this.logRequest('reply', true, undefined, duration);
@@ -705,7 +761,15 @@ export class CommunicationServer {
             const oldState = message.state;
             const readAt = label === 'read' ? new Date() : undefined;
             
-            this.db.updateMessageState(id, label, readAt);
+            // Update state
+            this.db.updateMessageState(id, label as MessageState);
+            
+            // Update read status if marking as read/unread
+            if (label === 'read') {
+              this.db.updateMessageReadStatus(id, true);
+            } else if (label === 'unread') {
+              this.db.updateMessageReadStatus(id, false);
+            }
             
             const duration = Date.now() - startTime;
             this.logRequest('label_messages', true, undefined, duration);
@@ -952,6 +1016,238 @@ export class CommunicationServer {
                     completed_conversations: completedConversations,
                     total_messages: totalMessages,
                     avg_messages_per_conversation: avgMessagesPerConversation
+                  })
+                }
+              ]
+            };
+          }
+
+          case 'get_message_templates': {
+            const { template_type } = request.params.arguments as { template_type?: string };
+            let templates: any[] = [];
+
+            if (template_type) {
+              switch (template_type.toUpperCase()) {
+                case 'BUG_REPORT':
+                  templates = [
+                    {
+                      name: 'Bug Report Template',
+                      subject: 'Bug Report: [Issue Description]',
+                      content: `**Bug Report**
+
+**Issue:** [Describe the bug in detail]
+**Steps to Reproduce:** [List steps to reproduce the bug]
+**Expected Behavior:** [What you expected to happen]
+**Actual Behavior:** [What actually happened]
+**Screenshots:** [If applicable, add screenshots to help explain your problem.]
+**Environment:** [OS, Browser, Version]
+**Additional Context:** [Add any other context about the problem here.]`
+                    },
+                    {
+                      name: 'Bug Report Template (Short)',
+                      subject: 'Bug Report: [Issue Description]',
+                      content: `**Bug Report**
+
+**Issue:** [Describe the bug in detail]
+**Steps to Reproduce:** [List steps to reproduce the bug]
+**Expected Behavior:** [What you expected to happen]
+**Actual Behavior:** [What actually happened]`
+                    }
+                  ];
+                  break;
+                case 'FEATURE_REQUEST':
+                  templates = [
+                    {
+                      name: 'Feature Request Template',
+                      subject: 'Feature Request: [Feature Description]',
+                      content: `**Feature Request**
+
+**Description:** [Describe the feature in detail]
+**Why:** [Why is this feature needed?]
+**How:** [How would you implement this feature?]
+**Additional Context:** [Add any other context about the feature here.]`
+                    },
+                    {
+                      name: 'Feature Request Template (Short)',
+                      subject: 'Feature Request: [Feature Description]',
+                      content: `**Feature Request**
+
+**Description:** [Describe the feature in detail]
+**Why:** [Why is this feature needed?]`
+                    }
+                  ];
+                  break;
+                case 'API_INTEGRATION':
+                  templates = [
+                    {
+                      name: 'API Integration Template',
+                      subject: 'API Integration: [Integration Description]',
+                      content: `**API Integration**
+
+**Description:** [Describe the API integration in detail]
+**Endpoints:** [List the endpoints to integrate]
+**Authentication:** [How will authentication be handled?]
+**Error Handling:** [How will errors be handled?]
+**Additional Context:** [Add any other context about the integration here.]`
+                    },
+                    {
+                      name: 'API Integration Template (Short)',
+                      subject: 'API Integration: [Integration Description]',
+                      content: `**API Integration**
+
+**Description:** [Describe the API integration in detail]
+**Endpoints:** [List the endpoints to integrate]`
+                    }
+                  ];
+                  break;
+                case 'CODE_REVIEW':
+                  templates = [
+                    {
+                      name: 'Code Review Template',
+                      subject: 'Code Review: [Code Title]',
+                      content: `**Code Review**
+
+**Code:** [Paste the code you want reviewed]
+**Questions:** [List questions about the code]
+**Additional Context:** [Add any other context about the code review here.]`
+                    },
+                    {
+                      name: 'Code Review Template (Short)',
+                      subject: 'Code Review: [Code Title]',
+                      content: `**Code Review**
+
+**Code:** [Paste the code you want reviewed]
+**Questions:** [List questions about the code]`
+                    }
+                  ];
+                  break;
+                case 'DEPLOYMENT':
+                  templates = [
+                    {
+                      name: 'Deployment Template',
+                      subject: 'Deployment: [Deployment Description]',
+                      content: `**Deployment**
+
+**Description:** [Describe the deployment in detail]
+**Steps:** [List the steps for deployment]
+**Environment:** [Which environment is this deployment for?]
+**Additional Context:** [Add any other context about the deployment here.]`
+                    },
+                    {
+                      name: 'Deployment Template (Short)',
+                      subject: 'Deployment: [Deployment Description]',
+                      content: `**Deployment**
+
+**Description:** [Describe the deployment in detail]
+**Steps:** [List the steps for deployment]`
+                    }
+                  ];
+                  break;
+                case 'TESTING':
+                  templates = [
+                    {
+                      name: 'Testing Template',
+                      subject: 'Testing: [Testing Description]',
+                      content: `**Testing**
+
+**Description:** [Describe the testing in detail]
+**Type:** [What type of testing is it?]
+**Environment:** [Which environment is this testing for?]
+**Additional Context:** [Add any other context about the testing here.]`
+                    },
+                    {
+                      name: 'Testing Template (Short)',
+                      subject: 'Testing: [Testing Description]',
+                      content: `**Testing**
+
+**Description:** [Describe the testing in detail]
+**Type:** [What type of testing is it?]`
+                    }
+                  ];
+                  break;
+                default:
+                  throw new Error(`Unknown template type: ${template_type}`);
+              }
+            } else {
+              // Default templates if no type is specified
+              templates = [
+                {
+                  name: 'Bug Report Template',
+                  subject: 'Bug Report: [Issue Description]',
+                  content: `**Bug Report**
+
+**Issue:** [Describe the bug in detail]
+**Steps to Reproduce:** [List steps to reproduce the bug]
+**Expected Behavior:** [What you expected to happen]
+**Actual Behavior:** [What actually happened]
+**Screenshots:** [If applicable, add screenshots to help explain your problem.]
+**Environment:** [OS, Browser, Version]
+**Additional Context:** [Add any other context about the problem here.]`
+                },
+                {
+                  name: 'Feature Request Template',
+                  subject: 'Feature Request: [Feature Description]',
+                  content: `**Feature Request**
+
+**Description:** [Describe the feature in detail]
+**Why:** [Why is this feature needed?]
+**How:** [How would you implement this feature?]
+**Additional Context:** [Add any other context about the feature here.]`
+                },
+                {
+                  name: 'API Integration Template',
+                  subject: 'API Integration: [Integration Description]',
+                  content: `**API Integration**
+
+**Description:** [Describe the API integration in detail]
+**Endpoints:** [List the endpoints to integrate]
+**Authentication:** [How will authentication be handled?]
+**Error Handling:** [How will errors be handled?]
+**Additional Context:** [Add any other context about the integration here.]`
+                },
+                {
+                  name: 'Code Review Template',
+                  subject: 'Code Review: [Code Title]',
+                  content: `**Code Review**
+
+**Code:** [Paste the code you want reviewed]
+**Questions:** [List questions about the code]
+**Additional Context:** [Add any other context about the code review here.]`
+                },
+                {
+                  name: 'Deployment Template',
+                  subject: 'Deployment: [Deployment Description]',
+                  content: `**Deployment**
+
+**Description:** [Describe the deployment in detail]
+**Steps:** [List the steps for deployment]
+**Environment:** [Which environment is this deployment for?]
+**Additional Context:** [Add any other context about the deployment here.]`
+                },
+                {
+                  name: 'Testing Template',
+                  subject: 'Testing: [Testing Description]',
+                  content: `**Testing**
+
+**Description:** [Describe the testing in detail]
+**Type:** [What type of testing is it?]
+**Environment:** [Which environment is this testing for?]
+**Additional Context:** [Add any other context about the testing here.]`
+                }
+              ];
+            }
+
+            const duration = Date.now() - startTime;
+            this.logRequest('get_message_templates', true, undefined, duration);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    templates: templates,
+                    count: templates.length,
+                    requested_template_type: template_type || 'all'
                   })
                 }
               ]
