@@ -1,0 +1,3 @@
+# This is a local-only MCP server
+# Do not attempt cloud deployment on Smithery
+# Users should install locally via npm: npm install communication-server-mcp

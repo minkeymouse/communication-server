@@ -1,4 +1,24 @@
+# Communication Server MCP - Local Installation Only
+# This is a local MCP server for inter-agent communication
+# Users install this package locally and run it via MCP clients
+# NOT intended for cloud deployment on Smithery
+
 runtime: "typescript"
 env:
   NODE_ENV: "production"
   DEBUG: "false"
+
+# IMPORTANT: This server is designed for LOCAL installation and usage only
+# It is NOT deployed to Smithery cloud but distributed via npm
+# Users install with: npm install communication-server-mcp
+# And run with: npx communication-server-mcp
+# 
+# This server uses SQLite for local data storage and is not suitable
+# for cloud deployment due to file system dependencies.
+
+# Local-only configuration
+deployment:
+  type: "local-only"
+  installCommand: "npm install communication-server-mcp"
+  runCommand: "npx communication-server-mcp"
+  description: "Local MCP server for inter-agent communication via email-like messaging"

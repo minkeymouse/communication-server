@@ -64,7 +64,34 @@ The server runs as a persistent service, not as a one-shot command processor. Th
 
 ## 🚀 Quick Start
 
-### Using Docker (Recommended)
+### Local MCP Server Installation (Recommended)
+
+This server is designed for local installation and usage with MCP clients:
+
+```bash
+# Install from npm
+npm install communication-server-mcp
+
+# Run directly
+npx communication-server-mcp
+```
+
+### MCP Client Configuration
+
+Add this to your MCP client configuration:
+
+```json
+{
+  "mcpServers": {
+    "communication-server": {
+      "command": "npx",
+      "args": ["communication-server-mcp"]
+    }
+  }
+}
+```
+
+### Using Docker (Alternative)
 
 ```bash
 # Build and run with Docker Compose
@@ -75,7 +102,7 @@ docker build -t communication-server-mcp .
 docker run -d --name communication-server-mcp communication-server-mcp
 ```
 
-### Using Systemd Service
+### Using Systemd Service (Alternative)
 
 ```bash
 # Install as system service
@@ -88,7 +115,7 @@ sudo systemctl start communication-server
 sudo systemctl status communication-server
 ```
 
-### Manual Installation
+### Manual Installation (Development)
 
 ```bash
 # Clone and install
@@ -100,6 +127,25 @@ npm run build
 # Start server
 npm start
 ```
+
+## 🔧 MCP & Smithery Compatibility
+
+### MCP Protocol Support
+This server implements the Model Context Protocol (MCP) and is compatible with:
+- **MCP Clients**: Any MCP-compatible client (Claude Desktop, etc.)
+- **Transport**: stdio transport for local communication
+- **Tools**: 22 comprehensive tools for agent communication
+- **Authentication**: Username/password and cryptographic identity
+
+### Smithery Integration
+While this server is designed for local installation, it's compatible with Smithery's MCP ecosystem:
+
+- **Local Installation**: Install via npm and run locally
+- **Smithery CLI**: Can be used with Smithery CLI for development
+- **MCP Standards**: Follows MCP specifications for tool definitions
+- **Configuration**: Supports Smithery-style configuration schemas
+
+For detailed Smithery documentation, see [SMITHERY.md](./SMITHERY.md).
 
 ## 📋 Available Tools
 

@@ -1,6 +1,6 @@
 {
   "name": "communication-server-mcp",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Enhanced email-like messaging for AI agents with cryptographic identification, bulk operations, and account management",
   "main": "dist/index.js",
   "type": "module",
@@ -18,8 +18,7 @@
     "start:clean-db": "./scripts/start-clean.sh",
     "test": "echo 'Testing via JSONRPC stdin/stdout' && echo '{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"tools/list\", \"params\": {}}' | timeout 10s node dist/index.js",
     "test-tool": "echo '{\"jsonrpc\": \"2.0\", \"id\": 2, \"method\": \"tools/call\", \"params\": {\"name\": \"get_server_health\", \"arguments\": {\"random_string\": \"test\"}}}' | timeout 10s node dist/index.js",
-    "test-quick": "timeout 5s bash -c 'echo \"{\\\"jsonrpc\\\": \\\"2.0\\\", \\\"id\\\": 1, \\\"method\\\": \\\"tools/call\\\", \\\"params\\\": {\\\"name\\\": \\\"get_server_health\\\", \\\"arguments\\\": {\\\"random_string\\\": \\\"test\\\"}}}' | node dist/index.js'",
-    "postinstall": "npm run build"
+    "test-quick": "timeout 5s bash -c 'echo \"{\\\"jsonrpc\\\": \\\"2.0\\\", \\\"id\\\": 1, \\\"method\\\": \\\"tools/call\\\", \\\"params\\\": {\\\"name\\\": \\\"get_server_health\\\", \\\"arguments\\\": {\\\"random_string\\\": \\\"test\\\"}}}' | node dist/index.js'"
   },
   "keywords": [
     "mcp",
@@ -43,6 +42,7 @@
     "@types/better-sqlite3": "^7.6.9",
     "@types/node": "^20.0.0",
     "@types/uuid": "^10.0.0",
+    "tsx": "^4.20.5",
     "typescript": "^5.0.0"
   },
   "engines": {
@@ -50,15 +50,15 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-org/communication-server-mcp.git"
+    "url": "https://github.com/minkeymouse/communication-server-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/your-org/communication-server-mcp/issues"
+    "url": "https://github.com/minkeymouse/communication-server-mcp/issues"
   },
-  "homepage": "https://github.com/your-org/communication-server-mcp#readme",
+  "homepage": "https://github.com/minkeymouse/communication-server-mcp#readme",
   "mcp": {
     "name": "communication-server",
-    "version": "2.1.0",
+    "version": "2.1.1",
     "description": "Enhanced email-like messaging for AI agents with cryptographic identification, bulk operations, and account management",
     "transport": "stdio",
     "capabilities": {

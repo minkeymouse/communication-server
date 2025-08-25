@@ -1,0 +1,45 @@
+# Source files (not needed in published package)
+src/
+*.ts
+*.tsx
+
+# Development files
+.git/
+.gitignore
+.cursor/
+.vscode/
+*.log
+*.tmp
+
+# Test files
+test-*.sh
+test-client.js
+test-*.js
+__tests__/
+*.test.js
+*.spec.js
+
+# Documentation and config files
+PROGRESS.md
+smithery.yaml
+docker-compose.yml
+Dockerfile
+communication-server.service
+
+# Build artifacts
+node_modules/
+*.tgz
+*.tar.gz
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+*.tmp
+*.temp
