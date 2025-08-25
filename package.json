@@ -9,17 +9,11 @@
   },
   "scripts": {
     "build": "tsc",
-    "dev": "tsc --watch",
     "start": "node dist/index.js",
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "smithery:deploy": "npx @smithery/cli deploy",
-    "smithery:dev": "npx @smithery/cli dev",
-    "postinstall": "node scripts/postinstall.js",
-    "setup": "node scripts/setup.js",
-    "debug": "node dist/index.js",
-    "test-mcp": "echo '{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2024-11-05\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"test\", \"version\": \"1.0.0\"}}}' | node dist/index.js",
-    "test-tools": "echo '{\"jsonrpc\": \"2.0\", \"id\": 2, \"method\": \"tools/list\", \"params\": {}}' | node dist/index.js",
-    "clean": "rm -rf dist && rm -rf node_modules && npm install"
+    "dev": "tsc && node dist/index.js",
+    "test": "echo 'Testing via JSONRPC stdin/stdout' && echo '{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"tools/list\", \"params\": {}}' | node dist/index.js",
+    "test-tool": "echo '{\"jsonrpc\": \"2.0\", \"id\": 2, \"method\": \"tools/call\", \"params\": {\"name\": \"get_server_health\", \"arguments\": {\"random_string\": \"test\"}}}' | node dist/index.js",
+    "postinstall": "npm run build"
   },
   "keywords": [
     "mcp",

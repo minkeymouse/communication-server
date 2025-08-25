@@ -1,0 +1,30 @@
+[Unit]
+Description=Communication Server MCP
+Documentation=https://github.com/your-org/communication-server
+After=network.target
+
+[Service]
+Type=simple
+User=communication-server
+Group=communication-server
+WorkingDirectory=/opt/communication-server
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=communication-server
+
+# Environment variables
+Environment=NODE_ENV=production
+Environment=DEBUG=false
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/home/communication-server/.communication-server
+
+[Install]
+WantedBy=multi-user.target
