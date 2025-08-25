@@ -34,17 +34,77 @@ node dist/index.js
 
 ## Tools Available
 
-1. **create_agent** - Create an agent for a project directory
-2. **send** - Send messages to other project agents
-3. **reply** - Reply to existing messages
-4. **check_mailbox** - View recent messages
-5. **label_messages** - Change message states
-6. **list_messages** - Get message summaries
-7. **query_messages** - Search messages
-8. **get_server_health** - Check server status
-9. **get_unread_count** - Get unread statistics
-10. **view_conversation_log** - View conversation history
-11. **get_conversation_stats** - Get conversation statistics
+1. **create_agent** - Create an agent for a project directory (supports custom names and roles)
+2. **list_agents** - List all agents in a specific workspace directory
+3. **send** - Send messages to other project agents
+4. **reply** - Reply to existing messages
+5. **check_mailbox** - View recent messages
+6. **label_messages** - Change message states
+7. **list_messages** - Get message summaries
+8. **query_messages** - Search messages
+9. **get_server_health** - Check server status
+10. **get_unread_count** - Get unread statistics
+11. **view_conversation_log** - View conversation history
+12. **get_conversation_stats** - Get conversation statistics
+
+## Multi-Agent Support
+
+The communication server now supports multiple agents in the same directory. This allows for more granular agent management:
+
+### Creating Multiple Agents
+
+```bash
+# Create a frontend agent
+create_agent({
+  path: "/project/src",
+  name: "Frontend Agent",
+  role: "developer"
+})
+
+# Create a backend agent in the same directory
+create_agent({
+  path: "/project/src", 
+  name: "Backend Agent",
+  role: "developer"
+})
+
+# Create a database agent
+create_agent({
+  path: "/project/src",
+  name: "Database Agent", 
+  role: "analyst"
+})
+```
+
+### Listing Agents
+
+```bash
+# List all agents in a directory
+list_agents({
+  path: "/project/src"
+})
+```
+
+### Agent Naming and Roles
+
+- **Names**: Custom names for better identification (e.g., "Frontend Agent", "API Agent")
+- **Roles**: Predefined roles for different responsibilities:
+  - `general` - General purpose agent
+  - `developer` - Software development tasks
+  - `manager` - Project management tasks
+  - `analyst` - Data analysis tasks
+  - `tester` - Testing and quality assurance
+  - `designer` - UI/UX design tasks
+  - `coordinator` - Coordination and communication
+
+### Agent ID Generation
+
+Agent IDs are now generated using a combination of:
+- Workspace path hash (4 digits)
+- Agent name hash (3 digits) 
+- Random UUID (8 characters)
+
+This ensures uniqueness while maintaining readability and allowing multiple agents per directory.
 
 ## Configuration
 
