@@ -25,6 +25,13 @@ export enum MessageState {
   UNREAD = "unread"
 }
 
+export enum MessagePriority {
+  LOW = "low",
+  NORMAL = "normal",
+  HIGH = "high",
+  URGENT = "urgent"
+}
+
 export interface Agent {
   id: string;
   name: string;
@@ -57,6 +64,8 @@ export interface Message {
   subject: string;
   content: string;
   state: MessageState;
+  priority: MessagePriority;
+  expiresAt?: Date;
   replyTo?: string;  // Message ID this is replying to
   createdAt: Date;
   readAt?: Date;
@@ -133,7 +142,9 @@ export function createMessage(
   subject: string,
   content: string,
   state: MessageState = MessageState.SENT,
-  replyTo?: string
+  replyTo?: string,
+  priority: MessagePriority = MessagePriority.NORMAL,
+  expiresAt?: Date
 ): Message {
   return {
     id: uuidv4(),
@@ -143,6 +154,8 @@ export function createMessage(
     subject,
     content,
     state,
+    priority,
+    expiresAt,
     replyTo,
     createdAt: new Date(),
     isRead: false,

@@ -6,7 +6,7 @@ import Database from 'better-sqlite3';
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
-import { Agent, Conversation, Message, LogEntry, ConversationSummary, AgentRole, MessageState } from './models.js';
+import { Agent, Conversation, Message, LogEntry, ConversationSummary, AgentRole, MessageState, MessagePriority } from './models.js';
 
 export class DatabaseManager {
   private db: Database.Database;
@@ -82,6 +82,8 @@ export class DatabaseManager {
         subject TEXT NOT NULL,
         content TEXT NOT NULL,
         state TEXT DEFAULT 'sent',
+        priority TEXT DEFAULT 'normal',
+        expires_at TEXT,
         reply_to TEXT,
         created_at TEXT NOT NULL,
         read_at TEXT,
@@ -227,6 +229,25 @@ export class DatabaseManager {
           
           console.log('✅ Database migration completed successfully');
         }
+      }
+
+      // Check if messages table needs priority and expiration columns
+      const messagesPragmaResult = this.db.pragma('table_info(messages)') as any[];
+      const priorityColumn = messagesPragmaResult.find(col => col.name === 'priority');
+      const expiresAtColumn = messagesPragmaResult.find(col => col.name === 'expires_at');
+      
+      if (!priorityColumn || !expiresAtColumn) {
+        console.log('🔄 Migrating messages table: Adding priority and expiration columns');
+        
+        if (!priorityColumn) {
+          this.db.exec('ALTER TABLE messages ADD COLUMN priority TEXT DEFAULT "normal"');
+        }
+        
+        if (!expiresAtColumn) {
+          this.db.exec('ALTER TABLE messages ADD COLUMN expires_at TEXT');
+        }
+        
+        console.log('✅ Messages table migration completed successfully');
       }
     } catch (error) {
       console.warn('Database migration failed:', error);
@@ -387,11 +408,11 @@ export class DatabaseManager {
   createMessage(message: Message): string {
     const stmt = this.db.prepare(`
       INSERT INTO messages (
-        id, conversation_id, from_agent, to_agent, subject, content, state, reply_to, 
+        id, conversation_id, from_agent, to_agent, subject, content, state, priority, expires_at, reply_to, 
         created_at, requires_reply, from_agent_name, from_agent_role, from_agent_workspace,
         to_agent_name, to_agent_role, to_agent_workspace, metadata
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const result = stmt.run(
@@ -402,6 +423,8 @@ export class DatabaseManager {
       message.subject,
       message.content,
       message.state,
+      message.priority,
+      message.expiresAt ? message.expiresAt.toISOString() : null,
       message.replyTo || null,
       message.createdAt.toISOString(),
       message.requiresReply ? 1 : 0,
@@ -439,6 +462,8 @@ export class DatabaseManager {
       subject: row.subject,
       content: row.content,
       state: row.state as MessageState,
+      priority: row.priority as MessagePriority,
+      expiresAt: row.expires_at ? new Date(row.expires_at) : undefined,
       replyTo: row.reply_to,
       createdAt: new Date(row.created_at),
       readAt: row.read_at ? new Date(row.read_at) : undefined,
@@ -473,6 +498,8 @@ export class DatabaseManager {
       subject: row.subject,
       content: row.content,
       state: row.state as MessageState,
+      priority: row.priority as MessagePriority,
+      expiresAt: row.expires_at ? new Date(row.expires_at) : undefined,
       replyTo: row.reply_to,
       createdAt: new Date(row.created_at),
       readAt: row.read_at ? new Date(row.read_at) : undefined,
@@ -515,6 +542,8 @@ export class DatabaseManager {
       subject: row.subject,
       content: row.content,
       state: row.state as MessageState,
+      priority: row.priority as MessagePriority,
+      expiresAt: row.expires_at ? new Date(row.expires_at) : undefined,
       replyTo: row.reply_to,
       createdAt: new Date(row.created_at),
       readAt: row.read_at ? new Date(row.read_at) : undefined,
@@ -561,6 +590,31 @@ export class DatabaseManager {
     );
 
     return logEntry;
+  }
+
+  // Cleanup expired messages
+  cleanupExpiredMessages(): number {
+    const stmt = this.db.prepare(`
+      DELETE FROM messages 
+      WHERE expires_at IS NOT NULL 
+      AND expires_at < datetime('now')
+    `);
+    
+    const result = stmt.run();
+    return result.changes || 0;
+  }
+
+  // Get expired messages count
+  getExpiredMessagesCount(): number {
+    const stmt = this.db.prepare(`
+      SELECT COUNT(*) as count 
+      FROM messages 
+      WHERE expires_at IS NOT NULL 
+      AND expires_at < datetime('now')
+    `);
+    
+    const result = stmt.get() as any;
+    return result.count || 0;
   }
 
   // Statistics

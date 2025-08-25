@@ -12,6 +12,7 @@ import {
   Conversation, 
   AgentRole, 
   MessageState, 
+  MessagePriority,
   createAgent, 
   createMessage, 
   createConversation,
@@ -444,6 +445,88 @@ export class CommunicationServer {
                   description: 'Optional specific template type to get.',
                   enum: ['BUG_REPORT', 'FEATURE_REQUEST', 'API_INTEGRATION', 'CODE_REVIEW', 'DEPLOYMENT', 'TESTING'],
                   examples: ['BUG_REPORT', 'API_INTEGRATION']
+                }
+              }
+            }
+          },
+          {
+            name: 'send_priority_message',
+            description: 'Send a message with priority and optional expiration.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                to_path: {
+                  type: 'string',
+                  description: 'The absolute path to the target project directory.',
+                  pattern: '^/.*',
+                  examples: ['/home/user/projects/frontend', '/workspace/api-service']
+                },
+                to_agent: {
+                  type: 'string',
+                  description: 'Optional specific agent name to send to.',
+                  examples: ['Frontend Agent', 'Backend Agent']
+                },
+                from_path: {
+                  type: 'string',
+                  description: 'Optional absolute path for the sender project.',
+                  pattern: '^/.*',
+                  examples: ['/home/user/projects/backend']
+                },
+                title: {
+                  type: 'string',
+                  description: 'The subject/title of your message.',
+                  minLength: 1,
+                  examples: ['URGENT: System Down', 'High Priority: Security Issue']
+                },
+                content: {
+                  type: 'string',
+                  description: 'The main body of your message.',
+                  minLength: 1,
+                  examples: ['This is an urgent message that requires immediate attention.']
+                },
+                priority: {
+                  type: 'string',
+                  description: 'Message priority level.',
+                  enum: ['low', 'normal', 'high', 'urgent'],
+                  default: 'normal',
+                  examples: ['high', 'urgent']
+                },
+                expires_in_hours: {
+                  type: 'integer',
+                  description: 'Optional expiration time in hours from now.',
+                  minimum: 1,
+                  maximum: 8760, // 1 year
+                  examples: [24, 168, 720]
+                }
+              },
+              required: ['to_path', 'title', 'content']
+            }
+          },
+          {
+            name: 'cleanup_expired_messages',
+            description: 'Clean up expired messages from the database.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                random_string: {
+                  type: 'string',
+                  description: 'Dummy parameter for no-parameter tools'
+                }
+              },
+              required: ['random_string']
+            }
+          },
+          {
+            name: 'get_message_stats',
+            description: 'Get basic message statistics for the current agent.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                from_path: {
+                  type: 'string',
+                  description: 'Optional absolute path for your project. Defaults to current working directory.',
+                  pattern: '^/.*',
+                  examples: ['/home/user/projects/backend']
                 }
               }
             }
@@ -1248,6 +1331,136 @@ export class CommunicationServer {
                     templates: templates,
                     count: templates.length,
                     requested_template_type: template_type || 'all'
+                  })
+                }
+              ]
+            };
+          }
+
+          case 'send_priority_message': {
+            const { to_path, to_agent, title, content, from_path, priority, expires_in_hours } = request.params.arguments as {
+              to_path: string;
+              to_agent?: string;
+              title: string;
+              content: string;
+              from_path?: string;
+              priority: string;
+              expires_in_hours?: number;
+            };
+
+            if (!title || !content) {
+              throw new Error('Title and content are required for priority messages');
+            }
+
+            // Get or create recipient agent
+            let recipient: Agent;
+            if (to_agent) {
+              const foundRecipient = this.db.getAgentByNameAndWorkspace(to_agent, to_path);
+              if (!foundRecipient) {
+                throw new Error(`Agent '${to_agent}' not found in workspace '${to_path}'`);
+              }
+              recipient = foundRecipient;
+            } else {
+              recipient = await this.getOrCreateAgent(to_path);
+            }
+
+            // Get or create sender agent (current workspace)
+            const senderWorkspace = this.resolveWorkspacePath(from_path);
+            const sender = await this.getOrCreateAgent(senderWorkspace);
+
+            // Create conversation
+            const conversation = createConversation(title, [sender.id, recipient.id], sender.id);
+            this.db.createConversation(conversation);
+
+            // Create message
+            const message = createMessage(
+              conversation.id,
+              sender.id,
+              recipient.id,
+              title,
+              content,
+              MessageState.SENT,
+              undefined, // No original message ID for new messages
+              priority as MessagePriority, // Use priority as state
+              expires_in_hours ? new Date(Date.now() + expires_in_hours * 60 * 60 * 1000) : undefined // Set expiration
+            );
+
+            // Add sender information
+            message.fromAgentName = sender.name;
+            message.fromAgentRole = sender.role;
+            message.fromAgentWorkspace = sender.workspacePath;
+            message.toAgentName = recipient.name;
+            message.toAgentRole = recipient.role;
+            message.toAgentWorkspace = recipient.workspacePath;
+
+            const messageId = this.db.createMessage(message);
+
+            const duration = Date.now() - startTime;
+            this.logRequest('send_priority_message', true, undefined, duration);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    message_id: messageId,
+                    to_agent: getDisplayName(recipient),
+                    to_path: to_path,
+                    to_address: getFullAddress(recipient),
+                    subject: title,
+                    status: 'sent'
+                  })
+                }
+              ]
+            };
+          }
+
+          case 'cleanup_expired_messages': {
+            const startTime = Date.now();
+            const cleanedCount = this.db.cleanupExpiredMessages();
+            const duration = Date.now() - startTime;
+            this.logRequest('cleanup_expired_messages', true, undefined, duration);
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    cleaned_count: cleanedCount,
+                    status: 'success'
+                  })
+                }
+              ]
+            };
+          }
+
+          case 'get_message_stats': {
+            const { from_path } = request.params.arguments as { from_path?: string };
+            const senderWorkspace = this.resolveWorkspacePath(from_path);
+            const sender = await this.getOrCreateAgent(senderWorkspace);
+
+            const totalMessages = this.db.getMessagesForAgent(sender.id, 1000).length;
+            const totalSent = this.db.getMessagesForAgent(sender.id, 1000).filter(msg => msg.state === MessageState.SENT).length;
+            const totalArrived = this.db.getMessagesForAgent(sender.id, 1000).filter(msg => msg.state === MessageState.ARRIVED).length;
+            const totalReplied = this.db.getMessagesForAgent(sender.id, 1000).filter(msg => msg.state === MessageState.REPLIED).length;
+            const totalIgnored = this.db.getMessagesForAgent(sender.id, 1000).filter(msg => msg.state === MessageState.IGNORED).length;
+            const totalRead = this.db.getMessagesForAgent(sender.id, 1000).filter(msg => msg.isRead).length;
+            const totalUnread = this.db.getMessagesForAgent(sender.id, 1000).filter(msg => !msg.isRead).length;
+
+            const duration = Date.now() - startTime;
+            this.logRequest('get_message_stats', true, undefined, duration);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    total_messages: totalMessages,
+                    total_sent: totalSent,
+                    total_arrived: totalArrived,
+                    total_replied: totalReplied,
+                    total_ignored: totalIgnored,
+                    total_read: totalRead,
+                    total_unread: totalUnread
                   })
                 }
               ]
