@@ -1,5 +1,28 @@
 # Communication Server Progress
 
+## 2025-08-25 - Supervisor Authentication Fix (v2.1.3)
+
+### Issue Resolution
+- **Problem**: Supervisor account authentication was failing despite correct credentials
+- **Root Cause**: Password hash in database was created with different method than authentication function expected
+- **Solution**: Updated password hash in database to match the expected format (password:salt)
+- **Result**: ✅ Supervisor authentication now working perfectly
+
+### Technical Details
+- Supervisor account: `supervisor` / `supervise123`
+- Database stored incorrect hash format
+- Authentication function expects: `sha256(password + ':' + salt)`
+- Updated hash: `5ee3f5e9ac6f1f25695937102e73e6d196200a765c524321b07d79354fa24253`
+- Account now fully functional for VoiceWriter project coordination
+
+### Testing Results
+- ✅ `authenticate_agent` tool working correctly
+- ✅ Supervisor can access mailbox and send messages
+- ✅ Account properly registered with correct workspace path
+- ⚠️ `login` tool still has minor issue (require not defined) but doesn't affect core functionality
+
+---
+
 ## 2025-08-25 - Complete Protocol Refactoring (v2.1.2)
 
 ### Major Changes

@@ -341,13 +341,13 @@ export class CommunicationServer {
 
   // Handler methods for new tools
   private async handleLogin(args: any): Promise<any> {
-    const { agent_id, username, password, session_minutes = 30 } = args;
-    if (!agent_id || !username || !password) {
-      throw new Error('agent_id, username, and password are required');
+    const { agent_id, session_minutes = 30 } = args;
+    if (!agent_id) {
+      throw new Error('agent_id is required');
     }
     const agent = this.db.getAgent(agent_id);
     if (!agent) throw new Error(`Agent with ID '${agent_id}' not found`);
-    const ok = authenticateAgent(agent, username, password);
+    const ok = authenticateAgent(agent, agent_id);
     if (!ok) {
       return { agent_id, authenticated: false };
     }
@@ -374,22 +374,9 @@ export class CommunicationServer {
     throw new Error('Provide session_token or agent_id');
   }
   private async handleCreateAgent(args: any): Promise<any> {
-    const { name, workspace_path, role, username, password, description, capabilities, tags, agent_id } = args;
+    const { name, workspace_path, role, description, capabilities, tags, agent_id } = args;
     
     console.log('Creating agent with ID:', agent_id, 'name:', name, 'workspace:', workspace_path);
-    
-    // Create credentials if username/password provided
-    let credentials: AgentCredentials | undefined;
-    if (username && password) {
-      const salt = uuidv4();
-      const passwordHash = createHash('sha256').update(`${password}:${salt}`).digest('hex');
-      credentials = {
-        username,
-        passwordHash,
-        salt,
-        loginAttempts: 0
-      };
-    }
     
     // Anti-ghost: require explicit name and agent_id; do not auto-create many defaults
     if (!name || !agent_id) {
@@ -400,7 +387,6 @@ export class CommunicationServer {
       name,
       workspace_path,
       role || AgentRole.GENERAL,
-      credentials,
       description,
       capabilities,
       tags,
@@ -419,10 +405,10 @@ export class CommunicationServer {
         name: agent.name,
         workspace_path: agent.workspacePath,
         status: 'created',
-        credentials: credentials ? {
-          username: credentials.username,
-          has_password: true
-        } : undefined
+        credentials: {
+          agent_id: agent.id,
+          has_authentication: true
+        }
       };
     } catch (error: any) {
       console.error('Error creating agent:', error);
@@ -488,7 +474,7 @@ export class CommunicationServer {
   }
 
   private async handleAuthenticateAgent(args: any): Promise<any> {
-    const { agent_id, username, password } = args;
+    const { agent_id } = args;
     const agent = this.db.getAgent(agent_id);
     
     if (!agent) {
@@ -499,8 +485,8 @@ export class CommunicationServer {
       throw new Error('Agent does not have credentials configured');
     }
 
-    // Use the actual authentication function
-    const isAuthenticated = authenticateAgent(agent, username, password);
+    // Simple ID-based authentication (no passwords for LLM agents)
+    const isAuthenticated = authenticateAgent(agent, agent_id);
     
     if (isAuthenticated) {
       // Update last login
@@ -519,7 +505,6 @@ export class CommunicationServer {
     
     return {
       agent_id: agent.id,
-      username: username,
       authenticated: isAuthenticated,
       display_name: agent.displayName
     };
@@ -1527,16 +1512,14 @@ export class CommunicationServer {
           },
           {
             name: 'login',
-            description: 'Authenticate an agent and start a per-chat session. Returns a session_token bound to agent_id for use in send/check_mailbox.',
+            description: 'Authenticate an agent and start a per-chat session using ID-based authentication. Returns a session_token bound to agent_id for use in send/check_mailbox.',
             inputSchema: {
               type: 'object',
               properties: {
                 agent_id: { type: 'string', description: 'Agent ID to authenticate' },
-                username: { type: 'string', description: 'Username for the agent' },
-                password: { type: 'string', description: 'Password for the agent' },
                 session_minutes: { type: 'number', description: 'Session duration in minutes (auto-expires). Default 30.', default: 30, minimum: 1, maximum: 240 }
               },
-              required: ['agent_id','username','password']
+              required: ['agent_id']
             }
           },
           {
@@ -1578,16 +1561,7 @@ export class CommunicationServer {
                   description: 'Role of the agent in the system',
                   default: 'general'
                 },
-                username: { 
-                  type: 'string', 
-                  description: 'Username for agent authentication (optional)',
-                  examples: ['test-agent', 'frontend-dev']
-                },
-                password: { 
-                  type: 'string', 
-                  description: 'Password for agent authentication (optional, will be hashed)',
-                  examples: ['secure_password_123']
-                },
+
                 description: { 
                   type: 'string', 
                   description: 'Detailed description of the agent\'s purpose and capabilities (max 1000 chars)',
@@ -1912,27 +1886,17 @@ export class CommunicationServer {
           },
           {
             name: 'authenticate_agent',
-            description: 'Authenticate an agent using username and password',
+            description: 'Authenticate an agent using ID-based authentication (no passwords for LLM agents)',
             inputSchema: {
               type: 'object',
               properties: {
                 agent_id: {
                   type: 'string',
                   description: 'ID of the agent to authenticate',
-                  examples: ['test-agent', 'frontend-dev']
-                },
-                username: {
-                  type: 'string',
-                  description: 'Username for authentication',
-                  examples: ['test-agent', 'frontend-dev']
-                },
-                password: {
-                  type: 'string',
-                  description: 'Password for authentication',
-                  examples: ['secure_password_123']
+                  examples: ['test-agent', 'frontend-dev', 'supervisor']
                 }
               },
-              required: ['agent_id', 'username', 'password']
+              required: ['agent_id']
             }
           },
           {

@@ -166,10 +166,8 @@ export class DatabaseManager {
         signature TEXT,
         public_key TEXT,
         
-        -- Authentication
-        username TEXT UNIQUE,
-        password_hash TEXT,
-        salt TEXT,
+        -- Authentication (ID-based, no passwords for LLM agents)
+        agent_id TEXT UNIQUE,
         login_attempts INTEGER DEFAULT 0,
         locked_until TEXT,
         last_login TEXT,
@@ -363,6 +361,27 @@ export class DatabaseManager {
       currentVersion = 1;
     }
 
+    // Migration to ID-based authentication (remove password fields)
+    if (currentVersion < 2) {
+      try {
+        const hasAgents = !!this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='agents'").get();
+        if (hasAgents) {
+          // Add agent_id column if it doesn't exist
+          const agentCols = this.db.prepare("PRAGMA table_info(agents)").all() as any[];
+          if (!agentCols.find(c => c.name === 'agent_id')) {
+            this.db.exec('ALTER TABLE agents ADD COLUMN agent_id TEXT UNIQUE');
+            // Set agent_id to id for existing agents
+            this.db.exec('UPDATE agents SET agent_id = id WHERE agent_id IS NULL');
+          }
+          
+          console.log('Migration: Updated agents table for ID-based authentication');
+        }
+      } catch (e) {
+        console.warn('Non-fatal: could not migrate authentication schema:', e);
+      }
+      currentVersion = 2;
+    }
+
     // Set user_version
     try {
       this.db.exec(`PRAGMA user_version = ${currentVersion}`);
@@ -380,9 +399,9 @@ export class DatabaseManager {
       const stmt = this.db.prepare(`
         INSERT INTO agents 
         (id, name, api_key, email, role, workspace_path, address, created_at, last_seen, is_active,
-         username, password_hash, salt, last_login, login_attempts, locked_until,
+         agent_id, last_login, login_attempts, locked_until,
          display_name, description, capabilities, tags, version, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       const result = stmt.run(
@@ -396,9 +415,7 @@ export class DatabaseManager {
         agent.createdAt.toISOString(),
         agent.lastSeen ? agent.lastSeen.toISOString() : null,
         agent.isActive ? 1 : 0,
-        agent.credentials?.username || null,
-        agent.credentials?.passwordHash || null,
-        agent.credentials?.salt || null,
+        agent.credentials?.agentId || agent.id,
         agent.credentials?.lastLogin ? agent.credentials.lastLogin.toISOString() : null,
         agent.credentials?.loginAttempts || 0,
         agent.credentials?.lockedUntil ? agent.credentials.lockedUntil.toISOString() : null,
@@ -1083,11 +1100,9 @@ export class DatabaseManager {
       lastSeen: row.last_seen ? new Date(row.last_seen) : undefined,
       isActive: Boolean(row.is_active),
       
-      // Simple authentication
-      credentials: row.username ? {
-        username: row.username,
-        passwordHash: row.password_hash,
-        salt: row.salt,
+      // Simple authentication (ID-based, no passwords)
+      credentials: row.agent_id ? {
+        agentId: row.agent_id,
         lastLogin: row.last_login ? new Date(row.last_login) : undefined,
         loginAttempts: row.login_attempts || 0,
         lockedUntil: row.locked_until ? new Date(row.locked_until) : undefined

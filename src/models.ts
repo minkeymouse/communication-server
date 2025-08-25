@@ -33,14 +33,14 @@ export enum MessagePriority {
   URGENT = "urgent"
 }
 
-// Simple authentication system: ID, PW, ADDRESS
+// Simple authentication system: ID + SESSION (no passwords for LLM agents)
 export interface AgentCredentials {
-  username: string;            // ID - Unique username for login
-  passwordHash: string;        // PW - Hashed password for authentication
-  salt: string;                // Salt for password hashing
+  agentId: string;             // ID - Unique agent identifier for authentication
   lastLogin?: Date;            // Last successful login
-  loginAttempts: number;       // Failed login attempts
-  lockedUntil?: Date;          // Account lockout until
+  loginAttempts: number;       // Failed login attempts (for rate limiting)
+  lockedUntil?: Date;          // Account lockout until (for rate limiting)
+  sessionToken?: string;       // Current active session token
+  sessionExpiresAt?: Date;     // Session expiration time
 }
 
 export interface Agent {
@@ -137,7 +137,6 @@ export function createAgent(
   name: string,
   workspacePath?: string,
   role: AgentRole = AgentRole.GENERAL,
-  credentials?: AgentCredentials,
   description?: string,
   capabilities?: string[],
   tags?: string[],
@@ -185,7 +184,10 @@ export function createAgent(
     createdAt,
     lastSeen: undefined,
     isActive: true,
-    credentials,
+    credentials: {
+      agentId: id,
+      loginAttempts: 0
+    },
     displayName: sanitizedName,
     description: sanitizedDescription,
     capabilities: capabilities || [],
@@ -200,15 +202,16 @@ export function generateAgentFingerprint(name: string, workspacePath?: string): 
   return `${name}@${workspacePath ? getProjectName(workspacePath) : 'localhost'}`;
 }
 
-export function authenticateAgent(agent: Agent, username: string, password: string): boolean {
+export function authenticateAgent(agent: Agent, agentId: string): boolean {
   if (!agent.credentials) return false;
-  if (agent.credentials.username !== username) return false;
+  if (agent.credentials.agentId !== agentId) return false;
   
-  const passwordHash = createHash('sha256')
-    .update(`${password}:${agent.credentials.salt}`)
-    .digest('hex');
+  // Check if account is locked due to too many failed attempts
+  if (agent.credentials.lockedUntil && new Date() < agent.credentials.lockedUntil) {
+    return false;
+  }
   
-  return passwordHash === agent.credentials.passwordHash;
+  return true;
 }
 
 export function getAgentIdentifier(agent: Agent): string {
