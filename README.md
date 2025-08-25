@@ -498,3 +498,87 @@ MIT License - see LICENSE file for details.
 **Version**: 2.1.0  
 **Last Updated**: August 2025  
 **Compatibility**: Node.js 18+, MCP Protocol 1.0+
+
+## Server Management
+
+### Starting the Server
+
+**Recommended: Use the clean startup script**
+```bash
+npm run start:clean-db
+```
+
+**Alternative: Use npm scripts**
+```bash
+# Clean start (kills existing instances)
+npm run start:clean
+
+# Restart with unique ID
+npm run restart
+
+# Kill all instances
+npm run kill-all
+```
+
+### Preventing Server Conflicts
+
+The server now includes comprehensive conflict resolution:
+
+1. **Automatic Process Detection**: Detects and warns about conflicting processes
+2. **Database Conflict Resolution**: Automatically cleans up WAL/SHM files from previous instances
+3. **Unique Instance IDs**: Each server instance gets a unique identifier
+4. **Database Path Isolation**: Each instance uses its own database directory
+5. **Graceful Shutdown**: Proper cleanup on SIGTERM/SIGINT
+6. **MCP Configuration**: Updated to use unique server identifiers
+
+### Database Management
+
+**Automatic Database Handling:**
+- **Existing Database**: Server detects and uses existing database if available
+- **New Database**: Creates fresh database if none exists
+- **Conflict Cleanup**: Automatically removes WAL/SHM files from crashed instances
+- **Process Termination**: Kills conflicting processes before starting
+
+**Database Paths:**
+- Default instance: `~/.communication-server/default/data/communication.db`
+- Unique instances: `~/.communication-server/{instance-id}/data/communication.db`
+
+### Troubleshooting
+
+**If tools return wrong data:**
+1. Check MCP client configuration points to correct binary
+2. Verify single instance running: `ps aux | grep "node.*dist/index.js"`
+3. Restart with clean database: `npm run start:clean-db`
+
+**If database errors occur:**
+1. Verify single instance running
+2. Check database path isolation
+3. Restart with unique ID: `npm run start:unique`
+
+**If agent creation fails:**
+1. Restart server: `npm run restart`
+2. Verify agent exists: `sqlite3 ~/.communication-server/*/data/communication.db "SELECT * FROM agents;"`
+
+**If conflicting processes detected:**
+1. Use clean startup: `npm run start:clean-db`
+2. Check for zombie processes: `ps aux | grep "node.*dist/index.js"`
+3. Manual cleanup: `pkill -f "node.*dist/index.js"`
+
+### MCP Configuration
+
+Update your MCP client configuration to use the unique server:
+
+```json
+{
+  "mcpServers": {
+    "communication-server-v2": {
+      "command": "node",
+      "args": ["/path/to/communication-server/dist/index.js"],
+      "env": {
+        "MCP_SERVER_ID": "comm-server-v2",
+        "NODE_ENV": "production"
+      }
+    }
+  }
+}
+```

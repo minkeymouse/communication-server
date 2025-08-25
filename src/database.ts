@@ -9,91 +9,181 @@ import * as fs from 'fs';
 import { Agent, Conversation, Message, LogEntry, ConversationSummary, AgentRole, MessageState, MessagePriority } from './models.js';
 
 export class DatabaseManager {
-  private db: Database.Database;
+  private db!: Database.Database;
   private dbPath: string;
   private logger: any;
+  private isConnected: boolean = false;
+  private connectionRetries: number = 0;
+  private readonly MAX_RETRIES = 3;
 
   constructor(dbPath?: string) {
+    // Use unique instance ID for database path isolation
+    const instanceId = process.env.MCP_SERVER_ID || 'default';
+    
     // Use generic data directory that works from anywhere
     if (!dbPath) {
-      const dataDir = path.join(os.homedir(), '.communication-server', 'data');
+      const dataDir = path.join(os.homedir(), '.communication-server', instanceId, 'data');
       fs.mkdirSync(dataDir, { recursive: true });
       dbPath = path.join(dataDir, 'communication.db');
     }
 
+    console.log(`🗄️ Initializing database for instance '${instanceId}' at:`, dbPath);
     this.dbPath = dbPath;
-    this.db = new Database(dbPath);
-    this.initializeDatabase();
-    this.createIndexes();
-    this.vacuumDatabase();
+    
+    // Check for conflicting processes and clean up if needed
+    this.handleConflictingProcesses();
+    
+    this.initializeConnection();
+  }
+
+  private handleConflictingProcesses(): void {
+    try {
+      const { execSync } = require('child_process');
+      
+      // Get all processes using this database
+      const output = execSync(`lsof "${this.dbPath}" 2>/dev/null || true`, { encoding: 'utf8' }).trim();
+      
+      if (output) {
+        console.log(`⚠️ Found processes using database: ${this.dbPath}`);
+        console.log('Cleaning up conflicting processes...');
+        
+        // Kill processes using this database
+        try {
+          execSync(`pkill -f "node.*dist/index.js"`, { stdio: 'ignore' });
+          // Wait a moment for processes to terminate
+          setTimeout(() => {}, 1000);
+        } catch (error) {
+          // Ignore errors if no processes found
+        }
+        
+        // Clean up WAL and SHM files
+        this.cleanupDatabaseFiles();
+      }
+    } catch (error) {
+      // Ignore errors in process detection
+      console.log('Process detection failed, continuing...');
+    }
+  }
+
+  private cleanupDatabaseFiles(): void {
+    try {
+      const dbDir = path.dirname(this.dbPath);
+      const dbName = path.basename(this.dbPath, '.db');
+      
+      // Remove WAL and SHM files
+      const walFile = path.join(dbDir, `${dbName}.db-wal`);
+      const shmFile = path.join(dbDir, `${dbName}.db-shm`);
+      
+      if (fs.existsSync(walFile)) {
+        fs.unlinkSync(walFile);
+        console.log('🗑️ Removed WAL file');
+      }
+      
+      if (fs.existsSync(shmFile)) {
+        fs.unlinkSync(shmFile);
+        console.log('🗑️ Removed SHM file');
+      }
+    } catch (error) {
+      console.log('Database file cleanup failed:', error);
+    }
+  }
+
+  private initializeConnection(): void {
+    try {
+      // Check if database already exists
+      const dbExists = fs.existsSync(this.dbPath);
+      
+      if (dbExists) {
+        console.log('📂 Using existing database');
+      } else {
+        console.log('🆕 Creating new database');
+      }
+      
+      this.db = new Database(this.dbPath);
+      this.isConnected = true;
+      this.connectionRetries = 0;
+      console.log('Database connection established');
+      
+      this.initializeDatabase();
+      console.log('Database initialization completed');
+      
+      this.createIndexes();
+      console.log('Database indexes created');
+      
+      this.vacuumDatabase();
+      console.log('Database vacuum completed');
+    } catch (error: any) {
+      console.error('Database connection failed:', error);
+      this.handleConnectionError(error);
+    }
+  }
+
+  private handleConnectionError(error: any): void {
+    if (this.connectionRetries < this.MAX_RETRIES) {
+      this.connectionRetries++;
+      console.log(`Retrying database connection (${this.connectionRetries}/${this.MAX_RETRIES})...`);
+      setTimeout(() => this.initializeConnection(), 1000 * this.connectionRetries);
+    } else {
+      console.error('Max database connection retries exceeded');
+      throw error;
+    }
+  }
+
+  private ensureConnection(): void {
+    if (!this.isConnected || !this.db) {
+      throw new Error('Database not connected');
+    }
   }
 
   private initializeDatabase(): void {
+    console.log('Starting database initialization...');
+    
     // Enable WAL mode for better concurrency
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
     this.db.pragma('cache_size = 10000');
     this.db.pragma('temp_store = MEMORY');
     this.db.pragma('mmap_size = 268435456'); // 256MB
+    this.db.pragma('foreign_keys = ON');
+    this.db.pragma('busy_timeout = 5000');
+    this.db.pragma('wal_autocheckpoint = 1000');
+    this.db.pragma('journal_size_limit = 67108864'); // 64MB
 
-    // Check if we need to migrate the database schema
-    this.migrateDatabase();
+    console.log('Database pragmas configured');
 
-    // Create agents table with enhanced identification
-    this.db.exec(`
+    // Create tables first (fresh installs) so subsequent migrations/indexes succeed
+    console.log('Creating database tables...');
+    
+    const createTablesSQL = `
       CREATE TABLE IF NOT EXISTS agents (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
-        api_key TEXT NOT NULL UNIQUE,
+        api_key TEXT NOT NULL,
         email TEXT,
-        role TEXT DEFAULT 'general',
+        role TEXT NOT NULL DEFAULT 'general',
         workspace_path TEXT,
         address TEXT,
         created_at TEXT NOT NULL,
         last_seen TEXT,
-        is_active BOOLEAN DEFAULT 1,
-        created_at_epoch INTEGER DEFAULT (strftime('%s', 'now')),
+        is_active INTEGER NOT NULL DEFAULT 1,
         
-        -- Enhanced identification fields
-        identity_hash TEXT UNIQUE,
-        public_key TEXT,
-        signature TEXT,
-        fingerprint TEXT,
-        display_name TEXT,
-        description TEXT,
-        capabilities TEXT, -- JSON array
-        tags TEXT, -- JSON array
-        version TEXT,
-        created_by TEXT,
-        
-        -- Credentials fields
-        username TEXT UNIQUE,
+        -- Simple authentication: ID, PW, ADDRESS
+        username TEXT,
         password_hash TEXT,
         salt TEXT,
         last_login TEXT,
         login_attempts INTEGER DEFAULT 0,
-        locked_until TEXT
-      )
-    `);
+        locked_until TEXT,
+        
+        -- Additional metadata
+        display_name TEXT,
+        description TEXT,
+        capabilities TEXT,
+        tags TEXT,
+        version TEXT,
+        created_by TEXT
+      );
 
-    // Create conversations table
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS conversations (
-        id TEXT PRIMARY KEY,
-        participants TEXT NOT NULL,
-        created_by TEXT NOT NULL,
-        subject TEXT,
-        created_at TEXT NOT NULL,
-        last_activity TEXT,
-        created_at_epoch INTEGER DEFAULT (strftime('%s', 'now')),
-        is_active BOOLEAN DEFAULT 1,
-        updated_at TEXT,
-        message_count INTEGER DEFAULT 0
-      )
-    `);
-
-    // Create messages table
-    this.db.exec(`
       CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
         conversation_id TEXT NOT NULL,
@@ -101,57 +191,74 @@ export class DatabaseManager {
         to_agent TEXT NOT NULL,
         subject TEXT NOT NULL,
         content TEXT NOT NULL,
-        state TEXT DEFAULT 'sent',
-        priority TEXT DEFAULT 'normal',
+        state TEXT NOT NULL DEFAULT 'sent',
+        priority TEXT NOT NULL DEFAULT 'normal',
         expires_at TEXT,
         reply_to TEXT,
         created_at TEXT NOT NULL,
         read_at TEXT,
         replied_at TEXT,
         archived_at TEXT,
-        is_read BOOLEAN DEFAULT 0,
-        requires_reply BOOLEAN DEFAULT 1,
-        created_at_epoch INTEGER DEFAULT (strftime('%s', 'now')),
+        is_read INTEGER NOT NULL DEFAULT 0,
+        requires_reply INTEGER NOT NULL DEFAULT 1,
         from_agent_name TEXT,
         from_agent_role TEXT,
         from_agent_workspace TEXT,
         to_agent_name TEXT,
         to_agent_role TEXT,
         to_agent_workspace TEXT,
-        metadata TEXT -- JSON object for additional data
-      )
-    `);
+        metadata TEXT
+      );
 
-    // Create logs table
-    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS conversations (
+        id TEXT PRIMARY KEY,
+        subject TEXT NOT NULL,
+        participants TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        message_count INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS agent_sessions (
+        id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        session_token TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        FOREIGN KEY (agent_id) REFERENCES agents (id)
+      );
+
       CREATE TABLE IF NOT EXISTS logs (
         id TEXT PRIMARY KEY,
         level TEXT NOT NULL,
         message TEXT NOT NULL,
-        created_at TEXT NOT NULL,
         agent_id TEXT,
         conversation_id TEXT,
         message_id TEXT,
-        metadata TEXT,
-        created_at_epoch INTEGER DEFAULT (strftime('%s', 'now'))
-      )
-    `);
-
-    // Create agent sessions table for authentication
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS agent_sessions (
-        id TEXT PRIMARY KEY,
-        agent_id TEXT NOT NULL,
-        session_token TEXT UNIQUE NOT NULL,
         created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        last_activity TEXT,
-        ip_address TEXT,
-        user_agent TEXT,
-        is_active BOOLEAN DEFAULT 1,
-        created_at_epoch INTEGER DEFAULT (strftime('%s', 'now'))
-      )
-    `);
+        metadata TEXT
+      );
+    `;
+
+    try {
+      this.db.exec(createTablesSQL);
+      console.log('Database tables created successfully');
+    } catch (error: any) {
+      console.error('Error creating database tables:', error);
+      // Do not rethrow to allow migrations to potentially heal
+    }
+
+    // Run migrations only after base tables exist, and guard errors
+    try {
+      this.migrateDatabase();
+    } catch (error) {
+      console.warn('Migration step failed, continuing with base schema:', error);
+    }
+
+    console.log('Database initialization completed');
   }
 
   private createIndexes(): void {
@@ -160,7 +267,6 @@ export class DatabaseManager {
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_agents_api_key ON agents(api_key)');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_agents_active ON agents(is_active)');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_agents_name_workspace ON agents(name, workspace_path)');
-    this.db.exec('CREATE INDEX IF NOT EXISTS idx_agents_created_at ON agents(created_at_epoch)');
 
     // Indexes for conversations table
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_conversations_created_by ON conversations(created_by)');
@@ -174,17 +280,16 @@ export class DatabaseManager {
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_messages_state ON messages(state)');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_messages_requires_reply ON messages(requires_reply)');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_messages_reply_to ON messages(reply_to)');
-    this.db.exec('CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at_epoch)');
-    this.db.exec('CREATE INDEX IF NOT EXISTS idx_messages_subject_content ON messages(subject, content)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at)');
 
     // Indexes for logs table
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level)');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_logs_agent_id ON logs(agent_id)');
 
-    // Indexes for sessions table
-    this.db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_agent_id ON sessions(agent_id)');
-    this.db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at)');
-    this.db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(is_active)');
+    // Indexes for agent_sessions table
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_agent_sessions_agent_id ON agent_sessions(agent_id)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_agent_sessions_expires_at ON agent_sessions(expires_at)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_agent_sessions_active ON agent_sessions(is_active)');
   }
 
   private vacuumDatabase(): void {
@@ -198,112 +303,67 @@ export class DatabaseManager {
   }
 
   private migrateDatabase(): void {
-    const version = this.db.prepare('PRAGMA user_version').get() as { user_version: number };
-    let currentVersion = version.user_version || 0;
+    let currentVersion = 0;
+    try {
+      const version = this.db.prepare('PRAGMA user_version').get() as { user_version: number };
+      currentVersion = version.user_version || 0;
+    } catch (e) {
+      console.warn('Unable to read PRAGMA user_version, assuming 0');
+      currentVersion = 0;
+    }
 
     console.log(`Current database version: ${currentVersion}`);
 
-    // Migration 1: Remove UNIQUE constraint from workspace_path and add new columns
+    // For simplified schema, we only ensure base columns exist; older migrations are skipped
     if (currentVersion < 1) {
-      console.log('Running migration 1: Schema updates');
-      
-      // Check if UNIQUE constraint exists on workspace_path
-      const tableInfo = this.db.prepare("PRAGMA table_info(agents)").all() as any[];
-      const workspacePathColumn = tableInfo.find(col => col.name === 'workspace_path');
-      
-      if (workspacePathColumn && workspacePathColumn.pk === 1) {
-        // Remove UNIQUE constraint by recreating table
-        this.db.exec(`
-          CREATE TABLE agents_new (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            api_key TEXT NOT NULL UNIQUE,
-            email TEXT,
-            role TEXT DEFAULT 'general',
-            workspace_path TEXT,
-            address TEXT,
-            created_at TEXT NOT NULL,
-            last_seen TEXT,
-            is_active BOOLEAN DEFAULT 1,
-            created_at_epoch INTEGER DEFAULT (strftime('%s', 'now'))
-          )
-        `);
-        
-        this.db.exec('INSERT INTO agents_new SELECT * FROM agents');
-        this.db.exec('DROP TABLE agents');
-        this.db.exec('ALTER TABLE agents_new RENAME TO agents');
+      // Ensure messages has new columns used by code if table exists
+      try {
+        const hasMessages = !!this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='messages'").get();
+        if (hasMessages) {
+          const addIfMissing = (columnDef: string) => {
+            const name = columnDef.split(' ')[0];
+            const cols = this.db.prepare("PRAGMA table_info(messages)").all() as any[];
+            if (!cols.find(c => c.name === name)) {
+              this.db.exec(`ALTER TABLE messages ADD COLUMN ${columnDef}`);
+            }
+          };
+          addIfMissing('read_at TEXT');
+          addIfMissing('replied_at TEXT');
+          addIfMissing('archived_at TEXT');
+          addIfMissing('from_agent_name TEXT');
+          addIfMissing('from_agent_role TEXT');
+          addIfMissing('from_agent_workspace TEXT');
+          addIfMissing('to_agent_name TEXT');
+          addIfMissing('to_agent_role TEXT');
+          addIfMissing('to_agent_workspace TEXT');
+          addIfMissing('metadata TEXT');
+        }
+      } catch (e) {
+        console.warn('Non-fatal: could not backfill messages columns:', e);
       }
-
-      // Add new columns to messages table
-      this.db.exec(`
-        ALTER TABLE messages ADD COLUMN priority TEXT DEFAULT 'normal'
-      `);
-      
-      this.db.exec(`
-        ALTER TABLE messages ADD COLUMN expires_at TEXT
-      `);
-
       currentVersion = 1;
     }
 
-    // Migration 2: Add enhanced identification fields
-    if (currentVersion < 2) {
-      console.log('Running migration 2: Enhanced identification fields');
-      
-      // Add new identification columns to agents table
-      const newColumns = [
-        'identity_hash TEXT UNIQUE',
-        'public_key TEXT',
-        'signature TEXT', 
-        'fingerprint TEXT',
-        'display_name TEXT',
-        'description TEXT',
-        'capabilities TEXT',
-        'tags TEXT',
-        'version TEXT',
-        'created_by TEXT',
-        'username TEXT UNIQUE',
-        'password_hash TEXT',
-        'salt TEXT',
-        'last_login TEXT',
-        'login_attempts INTEGER DEFAULT 0',
-        'locked_until TEXT'
-      ];
-
-      for (const columnDef of newColumns) {
-        try {
-          const columnName = columnDef.split(' ')[0];
-          this.db.exec(`ALTER TABLE agents ADD COLUMN ${columnDef}`);
-        } catch (error) {
-          // Column might already exist, ignore
-          console.log(`Column might already exist: ${columnDef}`);
-        }
-      }
-
-      // Add metadata column to messages
-      try {
-        this.db.exec('ALTER TABLE messages ADD COLUMN metadata TEXT');
-      } catch (error) {
-        // Column might already exist
-      }
-
-      currentVersion = 2;
+    // Set user_version
+    try {
+      this.db.exec(`PRAGMA user_version = ${currentVersion}`);
+      console.log(`Database migrated to version: ${currentVersion}`);
+    } catch (e) {
+      console.warn('Failed to set PRAGMA user_version:', e);
     }
-
-    // Update database version
-    this.db.prepare('PRAGMA user_version = ?').run(currentVersion);
-    console.log(`Database migrated to version: ${currentVersion}`);
   }
 
   // Agent operations
   createAgent(agent: Agent): string {
+    this.ensureConnection();
+    
     try {
       const stmt = this.db.prepare(`
         INSERT INTO agents 
         (id, name, api_key, email, role, workspace_path, address, created_at, last_seen, is_active,
-         identity_hash, public_key, signature, fingerprint, display_name, description, capabilities, tags, version, created_by,
-         username, password_hash, salt, last_login, login_attempts, locked_until)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         username, password_hash, salt, last_login, login_attempts, locked_until,
+         display_name, description, capabilities, tags, version, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       const result = stmt.run(
@@ -317,22 +377,18 @@ export class DatabaseManager {
         agent.createdAt.toISOString(),
         agent.lastSeen ? agent.lastSeen.toISOString() : null,
         agent.isActive ? 1 : 0,
-        agent.identity.identityHash,
-        agent.identity.publicKey,
-        agent.identity.signature,
-        agent.identity.fingerprint,
-        agent.displayName,
-        agent.description || null,
-        JSON.stringify(agent.capabilities || []),
-        JSON.stringify(agent.tags || []),
-        agent.version || null,
-        agent.createdBy || null,
         agent.credentials?.username || null,
         agent.credentials?.passwordHash || null,
         agent.credentials?.salt || null,
         agent.credentials?.lastLogin ? agent.credentials.lastLogin.toISOString() : null,
         agent.credentials?.loginAttempts || 0,
-        agent.credentials?.lockedUntil ? agent.credentials.lockedUntil.toISOString() : null
+        agent.credentials?.lockedUntil ? agent.credentials.lockedUntil.toISOString() : null,
+        agent.displayName,
+        agent.description || null,
+        JSON.stringify(agent.capabilities || []),
+        JSON.stringify(agent.tags || []),
+        agent.version || null,
+        agent.createdBy || null
       );
 
       return agent.id;
@@ -349,161 +405,65 @@ export class DatabaseManager {
   }
 
   getAgent(agentId: string): Agent | null {
-    const stmt = this.db.prepare('SELECT * FROM agents WHERE id = ?');
-    const row = stmt.get(agentId) as any;
+    this.ensureConnection();
+    
+    try {
+      const stmt = this.db.prepare('SELECT * FROM agents WHERE id = ?');
+      const row = stmt.get(agentId) as any;
 
-    if (!row) return null;
+      if (!row) return null;
 
-    return {
-      id: row.id,
-      name: row.name,
-      apiKey: row.api_key,
-      email: row.email,
-      role: row.role as AgentRole,
-      workspacePath: row.workspace_path,
-      address: row.address,
-      createdAt: new Date(row.created_at),
-      lastSeen: row.last_seen ? new Date(row.last_seen) : undefined,
-      isActive: Boolean(row.is_active),
-      identity: {
-        identityHash: row.identity_hash || '',
-        publicKey: row.public_key || '',
-        signature: row.signature || '',
-        fingerprint: row.fingerprint || ''
-      },
-      credentials: row.username ? {
-        username: row.username,
-        passwordHash: row.password_hash || '',
-        salt: row.salt || '',
-        lastLogin: row.last_login ? new Date(row.last_login) : undefined,
-        loginAttempts: row.login_attempts || 0,
-        lockedUntil: row.locked_until ? new Date(row.locked_until) : undefined
-      } : undefined,
-      displayName: row.display_name || row.name,
-      description: row.description,
-      capabilities: row.capabilities ? JSON.parse(row.capabilities) : [],
-      tags: row.tags ? JSON.parse(row.tags) : [],
-      version: row.version,
-      createdBy: row.created_by
-    };
+      return this.mapRowToAgent(row);
+    } catch (error) {
+      console.error('Error getting agent:', error);
+      return null;
+    }
   }
 
   getAgentByWorkspace(workspacePath: string): Agent | null {
-    const stmt = this.db.prepare('SELECT * FROM agents WHERE workspace_path = ? LIMIT 1');
-    const row = stmt.get(workspacePath) as any;
+    this.ensureConnection();
+    
+    try {
+      const stmt = this.db.prepare('SELECT * FROM agents WHERE workspace_path = ? LIMIT 1');
+      const row = stmt.get(workspacePath) as any;
 
-    if (!row) return null;
+      if (!row) return null;
 
-    return {
-      id: row.id,
-      name: row.name,
-      apiKey: row.api_key,
-      email: row.email,
-      role: row.role as AgentRole,
-      workspacePath: row.workspace_path,
-      address: row.address,
-      createdAt: new Date(row.created_at),
-      lastSeen: row.last_seen ? new Date(row.last_seen) : undefined,
-      isActive: Boolean(row.is_active),
-      identity: {
-        identityHash: row.identity_hash || '',
-        publicKey: row.public_key || '',
-        signature: row.signature || '',
-        fingerprint: row.fingerprint || ''
-      },
-      credentials: row.username ? {
-        username: row.username,
-        passwordHash: row.password_hash || '',
-        salt: row.salt || '',
-        lastLogin: row.last_login ? new Date(row.last_login) : undefined,
-        loginAttempts: row.login_attempts || 0,
-        lockedUntil: row.locked_until ? new Date(row.locked_until) : undefined
-      } : undefined,
-      displayName: row.display_name || row.name,
-      description: row.description,
-      capabilities: row.capabilities ? JSON.parse(row.capabilities) : [],
-      tags: row.tags ? JSON.parse(row.tags) : [],
-      version: row.version,
-      createdBy: row.created_by
-    };
+      return this.mapRowToAgent(row);
+    } catch (error) {
+      console.error('Error getting agent by workspace:', error);
+      return null;
+    }
   }
 
   getAgentsByWorkspace(workspacePath: string): Agent[] {
-    const stmt = this.db.prepare('SELECT * FROM agents WHERE workspace_path = ? AND is_active = 1 ORDER BY created_at');
-    const rows = stmt.all(workspacePath) as any[];
+    this.ensureConnection();
+    
+    try {
+      const stmt = this.db.prepare('SELECT * FROM agents WHERE workspace_path = ? AND is_active = 1 ORDER BY created_at');
+      const rows = stmt.all(workspacePath) as any[];
 
-    return rows.map(row => ({
-      id: row.id,
-      name: row.name,
-      apiKey: row.api_key,
-      email: row.email,
-      role: row.role as AgentRole,
-      workspacePath: row.workspace_path,
-      address: row.address,
-      createdAt: new Date(row.created_at),
-      lastSeen: row.last_seen ? new Date(row.last_seen) : undefined,
-      isActive: Boolean(row.is_active),
-      identity: {
-        identityHash: row.identity_hash || '',
-        publicKey: row.public_key || '',
-        signature: row.signature || '',
-        fingerprint: row.fingerprint || ''
-      },
-      credentials: row.username ? {
-        username: row.username,
-        passwordHash: row.password_hash || '',
-        salt: row.salt || '',
-        lastLogin: row.last_login ? new Date(row.last_login) : undefined,
-        loginAttempts: row.login_attempts || 0,
-        lockedUntil: row.locked_until ? new Date(row.locked_until) : undefined
-      } : undefined,
-      displayName: row.display_name || row.name,
-      description: row.description,
-      capabilities: row.capabilities ? JSON.parse(row.capabilities) : [],
-      tags: row.tags ? JSON.parse(row.tags) : [],
-      version: row.version,
-      createdBy: row.created_by
-    }));
+      return rows.map(row => this.mapRowToAgent(row));
+    } catch (error) {
+      console.error('Error getting agents by workspace:', error);
+      return [];
+    }
   }
 
   getAgentByNameAndWorkspace(name: string, workspacePath: string): Agent | null {
-    const stmt = this.db.prepare('SELECT * FROM agents WHERE name = ? AND workspace_path = ? AND is_active = 1');
-    const row = stmt.get(name, workspacePath) as any;
+    this.ensureConnection();
+    
+    try {
+      const stmt = this.db.prepare('SELECT * FROM agents WHERE name = ? AND workspace_path = ? AND is_active = 1');
+      const row = stmt.get(name, workspacePath) as any;
 
-    if (!row) return null;
+      if (!row) return null;
 
-    return {
-      id: row.id,
-      name: row.name,
-      apiKey: row.api_key,
-      email: row.email,
-      role: row.role as AgentRole,
-      workspacePath: row.workspace_path,
-      address: row.address,
-      createdAt: new Date(row.created_at),
-      lastSeen: row.last_seen ? new Date(row.last_seen) : undefined,
-      isActive: Boolean(row.is_active),
-      identity: {
-        identityHash: row.identity_hash || '',
-        publicKey: row.public_key || '',
-        signature: row.signature || '',
-        fingerprint: row.fingerprint || ''
-      },
-      credentials: row.username ? {
-        username: row.username,
-        passwordHash: row.password_hash || '',
-        salt: row.salt || '',
-        lastLogin: row.last_login ? new Date(row.last_login) : undefined,
-        loginAttempts: row.login_attempts || 0,
-        lockedUntil: row.locked_until ? new Date(row.locked_until) : undefined
-      } : undefined,
-      displayName: row.display_name || row.name,
-      description: row.description,
-      capabilities: row.capabilities ? JSON.parse(row.capabilities) : [],
-      tags: row.tags ? JSON.parse(row.tags) : [],
-      version: row.version,
-      createdBy: row.created_by
-    };
+      return this.mapRowToAgent(row);
+    } catch (error) {
+      console.error('Error getting agent by name and workspace:', error);
+      return null;
+    }
   }
 
   updateAgentLastSeen(agentId: string): void {
@@ -921,34 +881,53 @@ export class DatabaseManager {
 
   // Statistics
   getDatabaseStats(): any {
-    const agentStmt = this.db.prepare('SELECT COUNT(*) as count FROM agents WHERE is_active = 1');
-    const messageStmt = this.db.prepare('SELECT COUNT(*) as count FROM messages');
-    const conversationStmt = this.db.prepare('SELECT COUNT(*) as count FROM conversations WHERE is_active = 1');
-    const logStmt = this.db.prepare('SELECT COUNT(*) as count FROM logs');
+    try {
+      const agentStmt = this.db.prepare('SELECT COUNT(*) as count FROM agents WHERE is_active = 1');
+      const messageStmt = this.db.prepare('SELECT COUNT(*) as count FROM messages');
+      const conversationStmt = this.db.prepare('SELECT COUNT(*) as count FROM conversations WHERE is_active = 1');
+      const logStmt = this.db.prepare('SELECT COUNT(*) as count FROM logs');
 
-    const activeAgents = agentStmt.get() as any;
-    const totalMessages = messageStmt.get() as any;
-    const activeConversations = conversationStmt.get() as any;
-    const totalLogs = logStmt.get() as any;
+      const activeAgents = agentStmt.get() as any;
+      const totalMessages = messageStmt.get() as any;
+      const activeConversations = conversationStmt.get() as any;
+      const totalLogs = logStmt.get() as any;
 
-    // Get recent activity (last 24 hours)
-    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    const recentStmt = this.db.prepare('SELECT COUNT(*) as count FROM messages WHERE created_at > ?');
-    const recentMessages = recentStmt.get(yesterday.toISOString()) as any;
+      // Get recent activity (last 24 hours)
+      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const recentStmt = this.db.prepare('SELECT COUNT(*) as count FROM messages WHERE created_at > ?');
+      const recentMessages = recentStmt.get(yesterday.toISOString()) as any;
 
-    // Get database file size
-    const stats = fs.statSync(this.dbPath);
-    const dbSize = stats.size;
+      // Get database file size (handle case where main file doesn't exist yet)
+      let dbSize = 0;
+      try {
+        const stats = fs.statSync(this.dbPath);
+        dbSize = stats.size;
+      } catch (error) {
+        // Main database file might not exist yet in WAL mode
+        dbSize = 0;
+      }
 
-    return {
-      activeAgents: activeAgents.count,
-      totalMessages: totalMessages.count,
-      activeConversations: activeConversations.count,
-      totalLogs: totalLogs.count,
-      recentMessages24h: recentMessages.count,
-      databaseSizeBytes: dbSize,
-      databaseSizeMb: Math.round(dbSize / (1024 * 1024) * 100) / 100
-    };
+      return {
+        activeAgents: activeAgents.count,
+        totalMessages: totalMessages.count,
+        activeConversations: activeConversations.count,
+        totalLogs: totalLogs.count,
+        recentMessages24h: recentMessages.count,
+        databaseSizeBytes: dbSize,
+        databaseSizeMb: Math.round(dbSize / (1024 * 1024) * 100) / 100
+      };
+    } catch (error) {
+      // Return default stats if database operations fail
+      return {
+        activeAgents: 0,
+        totalMessages: 0,
+        activeConversations: 0,
+        totalLogs: 0,
+        recentMessages24h: 0,
+        databaseSizeBytes: 0,
+        databaseSizeMb: 0
+      };
+    }
   }
 
   close(): void {
@@ -968,20 +947,18 @@ export class DatabaseManager {
       createdAt: new Date(row.created_at),
       lastSeen: row.last_seen ? new Date(row.last_seen) : undefined,
       isActive: Boolean(row.is_active),
-      identity: {
-        identityHash: row.identity_hash || '',
-        publicKey: row.public_key || '',
-        signature: row.signature || '',
-        fingerprint: row.fingerprint || ''
-      },
+      
+      // Simple authentication
       credentials: row.username ? {
         username: row.username,
-        passwordHash: row.password_hash || '',
-        salt: row.salt || '',
+        passwordHash: row.password_hash,
+        salt: row.salt,
         lastLogin: row.last_login ? new Date(row.last_login) : undefined,
         loginAttempts: row.login_attempts || 0,
         lockedUntil: row.locked_until ? new Date(row.locked_until) : undefined
       } : undefined,
+      
+      // Additional metadata
       displayName: row.display_name || row.name,
       description: row.description,
       capabilities: row.capabilities ? JSON.parse(row.capabilities) : [],

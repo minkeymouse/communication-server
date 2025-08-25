@@ -1,31 +1,12 @@
 {
   "mcpServers": {
-    "communication-server": {
-      "command": "npx",
-      "args": ["communication-server-mcp@latest"],
-      "transport": "stdio",
-      "terminate_on_close": true
-    },
-    "communication-server-dev": {
+    "communication-server-v2": {
       "command": "node",
       "args": ["/data/communication_server/communication-server/dist/index.js"],
-      "transport": "stdio",
-      "terminate_on_close": true
-    },
-    "communication-server-smithery": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@smithery/cli@latest",
-        "run",
-        "communication-server-mcp",
-        "--key",
-        "YOUR_SMITHERY_API_KEY",
-        "--profile",
-        "YOUR_SMITHERY_PROFILE"
-      ],
-      "transport": "stdio",
-      "terminate_on_close": true
+      "env": {
+        "MCP_SERVER_ID": "comm-server-v2",
+        "NODE_ENV": "production"
+      }
     }
   }
 }

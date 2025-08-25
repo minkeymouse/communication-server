@@ -33,17 +33,10 @@ export enum MessagePriority {
   URGENT = "urgent"
 }
 
-// Enhanced agent identification protocol
-export interface AgentIdentity {
-  identityHash: string;        // Unique hash based on workspace + name + creation time
-  publicKey: string;           // Public identifier for verification
-  signature: string;           // Cryptographic signature for authentication
-  fingerprint: string;         // Human-readable fingerprint for verification
-}
-
+// Simple authentication system: ID, PW, ADDRESS
 export interface AgentCredentials {
-  username: string;            // Unique username for login
-  passwordHash: string;        // Hashed password for authentication
+  username: string;            // ID - Unique username for login
+  passwordHash: string;        // PW - Hashed password for authentication
   salt: string;                // Salt for password hashing
   lastLogin?: Date;            // Last successful login
   loginAttempts: number;       // Failed login attempts
@@ -51,22 +44,21 @@ export interface AgentCredentials {
 }
 
 export interface Agent {
-  id: string;
+  id: string;                  // ID - Unique agent identifier
   name: string;
   apiKey: string;
   email?: string;
   role: AgentRole;
-  workspacePath?: string;
+  workspacePath?: string;      // ADDRESS - Workspace path/address
   address?: string;
   createdAt: Date;
   lastSeen?: Date;
   isActive: boolean;
   
-  // Enhanced identification
-  identity: AgentIdentity;
+  // Simple authentication
   credentials?: AgentCredentials;
   
-  // Additional metadata for better identification
+  // Additional metadata
   displayName: string;         // Human-readable display name
   description?: string;        // Agent description
   capabilities?: string[];     // List of agent capabilities
@@ -145,83 +137,67 @@ export function createAgent(
   name: string,
   workspacePath?: string,
   role: AgentRole = AgentRole.GENERAL,
-  email?: string,
-  address?: string,
-  username?: string,
-  password?: string,
+  credentials?: AgentCredentials,
   description?: string,
   capabilities?: string[],
   tags?: string[],
-  createdBy?: string
+  createdBy?: string,
+  agentId?: string // User-provided ID
 ): Agent {
-  const workspaceHash = workspacePath ? Math.abs(workspacePath.hashCode()) % 10000 : 0;
-  const nameHash = Math.abs(name.hashCode()) % 1000;
-  const agentId = `${workspaceHash.toString().padStart(4, '0')}-${nameHash.toString().padStart(3, '0')}-${uuidv4().slice(0, 8)}`;
-  
-  // Generate unique identity hash
-  const identityData = `${workspacePath || 'unknown'}:${name}:${Date.now()}`;
-  const identityHash = createHash('sha256').update(identityData).digest('hex').slice(0, 16);
-  
-  // Generate public key and signature
-  const publicKey = uuidv4();
-  const signature = createHash('sha256').update(`${identityHash}:${publicKey}`).digest('hex').slice(0, 16);
-  
-  // Generate fingerprint
-  const fingerprint = `${name}@${workspacePath ? getProjectName(workspacePath) : 'localhost'}`;
-  
-  // Create credentials if username/password provided
-  let credentials: AgentCredentials | undefined;
-  if (username && password) {
-    const salt = uuidv4();
-    const passwordHash = createHash('sha256').update(`${password}:${salt}`).digest('hex');
-    credentials = {
-      username,
-      passwordHash,
-      salt,
-      loginAttempts: 0
-    };
+  // Input validation
+  if (!validateAgentName(name)) {
+    throw new Error('Invalid agent name. Must be a non-empty string up to 200 characters.');
   }
   
+  if (workspacePath && !validateWorkspacePath(workspacePath)) {
+    throw new Error('Invalid workspace path. Must be an absolute path starting with "/" up to 500 characters.');
+  }
+  
+  if (agentId && !validateAgentId(agentId)) {
+    throw new Error('Invalid agent ID. Must be a non-empty string up to 100 characters.');
+  }
+  
+  if (description && description.length > 1000) {
+    throw new Error('Description too long. Must be 1000 characters or less.');
+  }
+  
+  // Sanitize inputs
+  const sanitizedName = sanitizeString(name);
+  const sanitizedDescription = description ? sanitizeString(description) : undefined;
+  
+  // Use user-provided ID or generate a fallback
+  const id = agentId || `LOC-${Date.now().toString().slice(-4)}-${createHash('sha256')
+    .update(`${sanitizedName}:${workspacePath || 'unknown'}:${Date.now()}`)
+    .digest('hex')
+    .slice(0, 8)}`;
+
+  const apiKey = uuidv4();
+  const createdAt = new Date();
+
   return {
-    id: agentId,
-    name,
-    apiKey: uuidv4(),
-    email,
+    id,
+    name: sanitizedName,
+    apiKey,
+    email: undefined,
     role,
-    workspacePath,
-    address,
-    createdAt: new Date(),
+    workspacePath: workspacePath || undefined,
+    address: workspacePath || undefined,
+    createdAt,
+    lastSeen: undefined,
     isActive: true,
-    identity: {
-      identityHash,
-      publicKey,
-      signature,
-      fingerprint
-    },
     credentials,
-    displayName: `${name} (${workspacePath ? getProjectName(workspacePath) : 'unknown'})`,
-    description: description || `Agent for workspace: ${workspacePath || 'unknown'}`,
+    displayName: sanitizedName,
+    description: sanitizedDescription,
     capabilities: capabilities || [],
     tags: tags || [],
-    version: VERSION,
-    createdBy
+    version: '1.0.0',
+    createdBy: createdBy || 'system'
   };
 }
 
-// Helper functions for agent identification
+// Helper functions for simple authentication
 export function generateAgentFingerprint(name: string, workspacePath?: string): string {
   return `${name}@${workspacePath ? getProjectName(workspacePath) : 'localhost'}`;
-}
-
-export function verifyAgentIdentity(agent: Agent, providedSignature?: string): boolean {
-  if (!providedSignature) return false;
-  
-  const expectedSignature = createHash('sha256')
-    .update(`${agent.identity.identityHash}:${agent.identity.publicKey}`)
-    .digest('hex')
-    .slice(0, 16);
-  
-  return providedSignature === expectedSignature;
 }
 
 export function authenticateAgent(agent: Agent, username: string, password: string): boolean {
@@ -236,7 +212,7 @@ export function authenticateAgent(agent: Agent, username: string, password: stri
 }
 
 export function getAgentIdentifier(agent: Agent): string {
-  return `${agent.identity.fingerprint} (${agent.id})`;
+  return `${agent.name} (${agent.id})`;
 }
 
 export function getAgentShortId(agent: Agent): string {
@@ -249,26 +225,52 @@ export function createMessage(
   toAgent: string,
   subject: string,
   content: string,
-  state: MessageState = MessageState.SENT,
-  replyTo?: string,
   priority: MessagePriority = MessagePriority.NORMAL,
-  expiresAt?: Date
+  replyTo?: string,
+  expiresInHours?: number,
+  requiresReply: boolean = true,
+  metadata?: Record<string, any>
 ): Message {
+  // Input validation
+  if (!validateMessageSubject(subject)) {
+    throw new Error('Invalid message subject. Must be a non-empty string up to 500 characters.');
+  }
+  
+  if (!validateMessageContent(content)) {
+    throw new Error('Invalid message content. Must be a non-empty string up to 10,000 characters.');
+  }
+  
+  if (!validateAgentId(fromAgent) || !validateAgentId(toAgent)) {
+    throw new Error('Invalid agent ID provided.');
+  }
+  
+  if (conversationId.length === 0 || conversationId.length > 100) {
+    throw new Error('Invalid conversation ID. Must be 1-100 characters.');
+  }
+  
+  // Sanitize inputs
+  const sanitizedSubject = sanitizeString(subject);
+  const sanitizedContent = sanitizeString(content);
+  
+  const id = uuidv4();
+  const createdAt = new Date();
+  const expiresAt = expiresInHours ? new Date(createdAt.getTime() + expiresInHours * 60 * 60 * 1000) : undefined;
+
   return {
-    id: uuidv4(),
+    id,
     conversationId,
     fromAgent,
     toAgent,
-    subject,
-    content,
-    state,
+    subject: sanitizedSubject,
+    content: sanitizedContent,
+    state: MessageState.SENT,
     priority,
     expiresAt,
     replyTo,
-    createdAt: new Date(),
+    createdAt,
     isRead: false,
-    requiresReply: true,
-    metadata: {}
+    requiresReply,
+    metadata: metadata || {}
   };
 }
 
@@ -356,3 +358,34 @@ export const MessageTemplates = {
 } as const;
 
 export type MessageTemplateType = keyof typeof MessageTemplates;
+
+// Input validation utilities
+export function validateAgentId(agentId: string): boolean {
+  return typeof agentId === 'string' && agentId.length > 0 && agentId.length <= 100;
+}
+
+export function validateWorkspacePath(path: string): boolean {
+  return typeof path === 'string' && path.startsWith('/') && path.length <= 500;
+}
+
+export function validateAgentName(name: string): boolean {
+  return typeof name === 'string' && name.length > 0 && name.length <= 200;
+}
+
+export function sanitizeString(input: string): string {
+  return input.trim().replace(/[<>]/g, ''); // Basic XSS prevention
+}
+
+export function validateEmail(email?: string): boolean {
+  if (!email) return true; // Optional field
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return emailRegex.test(email);
+}
+
+export function validateMessageContent(content: string): boolean {
+  return typeof content === 'string' && content.length > 0 && content.length <= 10000;
+}
+
+export function validateMessageSubject(subject: string): boolean {
+  return typeof subject === 'string' && subject.length > 0 && subject.length <= 500;
+}

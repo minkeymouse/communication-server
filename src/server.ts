@@ -8,19 +8,22 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { DatabaseManager } from './database.js';
 import { 
   Agent, 
-  Message, 
-  Conversation, 
   AgentRole, 
   MessageState, 
   MessagePriority,
-  createAgent, 
-  createMessage, 
+  AgentCredentials,
+  createAgent,
+  createMessage,
   createConversation,
-  getDisplayName,
-  getFullAddress,
-  getProjectName
+  authenticateAgent,
+  getAgentIdentifier,
+  getAgentShortId,
+  MessageTemplates
 } from './models.js';
 import { v4 as uuidv4 } from 'uuid';
+import { createHash } from 'crypto';
+import { execSync } from 'child_process';
+
 
 export class CommunicationServer {
   private server: Server;
@@ -29,8 +32,16 @@ export class CommunicationServer {
   private requestCount: number = 0;
   private errorCount: number = 0;
   private requestTimes: number[] = [];
+  private serverId: string;
+  private requestCache: Map<string, { data: any; timestamp: number }> = new Map();
+  private readonly CACHE_TTL = 30000; // 30 seconds
+  private readonly MAX_REQUESTS_PER_MINUTE = 1000;
+  private requestTimestamps: number[] = [];
 
   constructor() {
+    this.serverId = process.env.MCP_SERVER_ID || `comm-server-${Date.now()}`;
+    this.validateServerIdentity();
+    
     this.server = new Server(
       {
         name: 'communication-server',
@@ -46,6 +57,156 @@ export class CommunicationServer {
     this.db = new DatabaseManager();
     this.startTime = new Date();
     this.setupTools();
+    this.setupGracefulShutdown();
+    this.startPerformanceMonitoring();
+  }
+
+  private startPerformanceMonitoring(): void {
+    // Monitor performance every 5 minutes
+    setInterval(() => {
+      this.logPerformanceStats();
+    }, 5 * 60 * 1000);
+  }
+
+  private logPerformanceStats(): void {
+    const uptime = Date.now() - this.startTime.getTime();
+    const avgResponseTime = this.requestTimes.length > 0 
+      ? this.requestTimes.reduce((a, b) => a + b, 0) / this.requestTimes.length 
+      : 0;
+    
+    console.log(`📊 Performance Stats - Uptime: ${Math.round(uptime / 1000)}s, Requests: ${this.requestCount}, Errors: ${this.errorCount}, Avg Response: ${avgResponseTime.toFixed(2)}ms`);
+  }
+
+  private checkRateLimit(): boolean {
+    const now = Date.now();
+    const oneMinuteAgo = now - 60000;
+    
+    // Remove old timestamps
+    this.requestTimestamps = this.requestTimestamps.filter(timestamp => timestamp > oneMinuteAgo);
+    
+    // Check if we're over the limit
+    if (this.requestTimestamps.length >= this.MAX_REQUESTS_PER_MINUTE) {
+      return false;
+    }
+    
+    // Add current request
+    this.requestTimestamps.push(now);
+    return true;
+  }
+
+  private getCachedResponse(cacheKey: string): any | null {
+    const cached = this.requestCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < this.CACHE_TTL) {
+      return cached.data;
+    }
+    this.requestCache.delete(cacheKey);
+    return null;
+  }
+
+  private setCachedResponse(cacheKey: string, data: any): void {
+    this.requestCache.set(cacheKey, {
+      data,
+      timestamp: Date.now()
+    });
+  }
+
+  private cleanupCache(): void {
+    const now = Date.now();
+    for (const [key, value] of this.requestCache.entries()) {
+      if (now - value.timestamp > this.CACHE_TTL) {
+        this.requestCache.delete(key);
+      }
+    }
+  }
+
+  private validateServerIdentity(): void {
+    console.log(`🚀 Starting ${this.serverId} at ${new Date().toISOString()}`);
+    console.log(`📋 Server PID: ${process.pid}, Environment: ${process.env.NODE_ENV || 'development'}`);
+    
+    // Verify we're not conflicting with other instances
+    const conflictingProcesses = this.checkForConflictingProcesses();
+    if (conflictingProcesses.length > 0) {
+      console.warn(`⚠️ Warning: Found ${conflictingProcesses.length} potentially conflicting processes:`);
+      conflictingProcesses.forEach((pid: number) => console.warn(`   - PID ${pid}`));
+      
+      // If we're starting with a unique ID, we can coexist
+      if (this.serverId.includes('comm-server-') && this.serverId !== 'comm-server-default') {
+        console.log('✅ Starting with unique ID - can coexist with other instances');
+      } else {
+        console.warn('⚠️ Consider using unique server ID to avoid conflicts');
+      }
+    } else {
+      console.log('✅ No conflicting processes found');
+    }
+  }
+
+  private checkForConflictingProcesses(): number[] {
+    try {
+      const { execSync } = require('child_process');
+      const output = execSync("pgrep -f 'node.*dist/index.js'", { encoding: 'utf8' }).trim();
+      if (!output) return [];
+      
+      const pids = output.split('\n').map((pid: string) => parseInt(pid.trim())).filter((pid: number) => pid !== process.pid);
+      return pids;
+    } catch (error) {
+      // No conflicting processes found
+      return [];
+    }
+  }
+
+  private setupGracefulShutdown(): void {
+    process.on('SIGTERM', () => {
+      console.log(`🛑 ${this.serverId} shutting down gracefully`);
+      this.cleanup();
+      process.exit(0);
+    });
+
+    process.on('SIGINT', () => {
+      console.log(`🛑 ${this.serverId} interrupted, cleaning up`);
+      this.cleanup();
+      process.exit(0);
+    });
+
+    process.on('uncaughtException', (error) => {
+      console.error(`❌ ${this.serverId} uncaught exception:`, error);
+      this.cleanup();
+      process.exit(1);
+    });
+
+    process.on('unhandledRejection', (reason, promise) => {
+      console.error(`❌ ${this.serverId} unhandled rejection at:`, promise, 'reason:', reason);
+      this.cleanup();
+      process.exit(1);
+    });
+
+    // Handle stdin end (when piped input ends)
+    process.stdin.on('end', () => {
+      console.log(`📤 ${this.serverId} stdin ended, shutting down gracefully`);
+      this.cleanup();
+      process.exit(0);
+    });
+
+    // Handle stdin close
+    process.stdin.on('close', () => {
+      console.log(`📤 ${this.serverId} stdin closed, shutting down gracefully`);
+      this.cleanup();
+      process.exit(0);
+    });
+  }
+
+  private cleanup(): void {
+    try {
+      // Clean up cache
+      this.cleanupCache();
+      console.log('🗑️ Cache cleaned up');
+      
+      if (this.db) {
+        this.db.close();
+        console.log('🗄️ Database connection closed');
+      }
+    } catch (error) {
+      console.error('Error during cleanup:', error);
+    }
   }
 
   private resolveWorkspacePath(providedPath?: string): string {
@@ -74,6 +235,11 @@ export class CommunicationServer {
       console.log(logMessage);
     } else {
       console.error(`❌ Error in ${toolName}: ${error}`);
+      
+      // Log detailed error information for debugging
+      if (error) {
+        console.error(`🔍 Error details: ${error}`);
+      }
     }
   }
 
@@ -112,7 +278,7 @@ export class CommunicationServer {
 
     // Create new agent
     const agent = createAgent(
-      agentName || getProjectName(workspacePath),
+      agentName || 'Default Agent',
       workspacePath,
       role || AgentRole.GENERAL
     );
@@ -134,38 +300,55 @@ export class CommunicationServer {
 
   // Handler methods for new tools
   private async handleCreateAgent(args: any): Promise<any> {
-    const { name, workspace_path, role, username, password, description, capabilities, tags } = args;
+    const { name, workspace_path, role, username, password, description, capabilities, tags, agent_id } = args;
     
-    if (!name) {
-      throw new Error('Agent name is required');
+    console.log('Creating agent with ID:', agent_id, 'name:', name, 'workspace:', workspace_path);
+    
+    // Create credentials if username/password provided
+    let credentials: AgentCredentials | undefined;
+    if (username && password) {
+      const salt = uuidv4();
+      const passwordHash = createHash('sha256').update(`${password}:${salt}`).digest('hex');
+      credentials = {
+        username,
+        passwordHash,
+        salt,
+        loginAttempts: 0
+      };
     }
-
-    const workspacePath = this.resolveWorkspacePath(workspace_path);
-    const parsedRole = role ? (role as AgentRole) : AgentRole.GENERAL;
     
     const agent = createAgent(
       name,
-      workspacePath,
-      parsedRole,
-      undefined, // email
-      undefined, // address
-      username,
-      password,
+      workspace_path,
+      role || AgentRole.GENERAL,
+      credentials,
       description,
       capabilities,
-      tags
+      tags,
+      'system', // createdBy
+      agent_id // User-provided ID
     );
-
-    this.db.createAgent(agent);
     
-    return {
-      agent_id: agent.id,
-      name: agent.name,
-      workspace_path: agent.workspacePath,
-      identity_hash: agent.identity.identityHash,
-      fingerprint: agent.identity.fingerprint,
-      status: 'created'
-    };
+    console.log('Created agent object:', agent.id, agent.name);
+    
+    try {
+      this.db.createAgent(agent);
+      console.log('Agent created successfully in database');
+      
+      return {
+        agent_id: agent.id,
+        name: agent.name,
+        workspace_path: agent.workspacePath,
+        status: 'created',
+        credentials: credentials ? {
+          username: credentials.username,
+          has_password: true
+        } : undefined
+      };
+    } catch (error: any) {
+      console.error('Error creating agent:', error);
+      throw error;
+    }
   }
 
   private async handleListAgents(args: any): Promise<any> {
@@ -179,8 +362,7 @@ export class CommunicationServer {
         name: agent.name,
         role: agent.role,
         workspace_path: agent.workspacePath,
-        identity_hash: agent.identity.identityHash,
-        fingerprint: agent.identity.fingerprint,
+        display_name: agent.displayName,
         last_seen: agent.lastSeen?.toISOString() || null
       })),
       count: agents.length,
@@ -198,11 +380,9 @@ export class CommunicationServer {
 
     return {
       agent_id: agent.id,
-      identity_hash: agent.identity.identityHash,
-      public_key: agent.identity.publicKey,
-      signature: agent.identity.signature,
-      fingerprint: agent.identity.fingerprint,
-      display_name: agent.displayName
+      display_name: agent.displayName,
+      workspace_path: agent.workspacePath,
+      has_credentials: !!agent.credentials
     };
   }
 
@@ -222,7 +402,7 @@ export class CommunicationServer {
       agent_id: agent.id,
       signature_provided: signature,
       signature_valid: isValid,
-      fingerprint: agent.identity.fingerprint
+      display_name: agent.displayName
     };
   }
 
@@ -238,9 +418,8 @@ export class CommunicationServer {
       throw new Error('Agent does not have credentials configured');
     }
 
-    // Assuming authenticateAgent is defined elsewhere or needs to be imported
-    // For now, we'll just return a placeholder
-    const isAuthenticated = true; // Placeholder for actual authentication logic
+    // Use the actual authentication function
+    const isAuthenticated = authenticateAgent(agent, username, password);
     
     if (isAuthenticated) {
       // Update last login
@@ -261,7 +440,7 @@ export class CommunicationServer {
       agent_id: agent.id,
       username: username,
       authenticated: isAuthenticated,
-      fingerprint: agent.identity.fingerprint
+      display_name: agent.displayName
     };
   }
 
@@ -314,7 +493,11 @@ export class CommunicationServer {
       recipient.id,
       title,
       content,
-      MessageState.SENT
+      MessagePriority.NORMAL,
+      undefined,
+      undefined,
+      true,
+      {}
     );
     
     // Add sender information
@@ -329,9 +512,9 @@ export class CommunicationServer {
     
     return {
       message_id: messageId,
-      to_agent: getDisplayName(recipient),
+      to_agent: recipient.name,
       to_path: to_path,
-      to_address: getFullAddress(recipient),
+      to_address: getAgentIdentifier(recipient),
       subject: title,
       status: 'sent'
     };
@@ -358,10 +541,10 @@ export class CommunicationServer {
       
       return {
         id: msg.id,
-        from_agent: fromAgent ? getDisplayName(fromAgent) : 'Unknown',
-        from_address: fromAgent ? getFullAddress(fromAgent) : 'Unknown',
-        to_agent: toAgent ? getDisplayName(toAgent) : 'Unknown',
-        to_address: toAgent ? getFullAddress(toAgent) : 'Unknown',
+        from_agent: fromAgent ? fromAgent.name : 'Unknown',
+        from_address: fromAgent ? getAgentIdentifier(fromAgent) : 'Unknown',
+        to_agent: toAgent ? toAgent.name : 'Unknown',
+        to_address: toAgent ? getAgentIdentifier(toAgent) : 'Unknown',
         subject: msg.subject,
         content: msg.content.length > 100 ? msg.content.substring(0, 100) + '...' : msg.content,
         created_at: msg.createdAt.toISOString(),
@@ -730,10 +913,11 @@ export class CommunicationServer {
       recipient.id,
       title,
       content,
-      MessageState.SENT,
+      MessagePriority.NORMAL,
       undefined,
-      priority as MessagePriority,
-      expires_in_hours ? new Date(Date.now() + expires_in_hours * 60 * 60 * 1000) : undefined
+      undefined,
+      true,
+      {}
     );
 
     message.fromAgentName = sender.name;
@@ -747,9 +931,9 @@ export class CommunicationServer {
 
     return {
       message_id: messageId,
-      to_agent: getDisplayName(recipient),
+      to_agent: recipient.name,
       to_path: to_path,
-      to_address: getFullAddress(recipient),
+      to_address: getAgentIdentifier(recipient),
       subject: title,
       status: 'sent'
     };
@@ -839,6 +1023,19 @@ export class CommunicationServer {
       const { name, arguments: args } = request.params;
       const startTime = Date.now();
       
+      // Check rate limiting
+      if (!this.checkRateLimit()) {
+        throw new Error('Rate limit exceeded. Please try again later.');
+      }
+
+      // Check cache for read-only operations
+      const cacheKey = `${name}:${JSON.stringify(args)}`;
+      const cachedResult = this.getCachedResponse(cacheKey);
+      if (cachedResult) {
+        console.log(`📋 Cache hit for ${name}`);
+        return { content: [{ type: 'text', text: JSON.stringify(cachedResult) }] };
+      }
+      
       try {
         let result: any;
         
@@ -848,9 +1045,12 @@ export class CommunicationServer {
             break;
           case 'list_agents':
             result = await this.handleListAgents(args);
+            // Cache read-only operations
+            this.setCachedResponse(cacheKey, result);
             break;
           case 'get_agent_identity':
             result = await this.handleGetAgentIdentity(args);
+            this.setCachedResponse(cacheKey, result);
             break;
           case 'verify_agent_identity':
             result = await this.handleVerifyAgentIdentity(args);
@@ -866,12 +1066,15 @@ export class CommunicationServer {
             break;
           case 'check_mailbox':
             result = await this.handleCheckMailbox(args);
+            this.setCachedResponse(cacheKey, result);
             break;
           case 'list_messages':
             result = await this.handleListMessages(args);
+            this.setCachedResponse(cacheKey, result);
             break;
           case 'query_messages':
             result = await this.handleQueryMessages(args);
+            this.setCachedResponse(cacheKey, result);
             break;
           case 'label_messages':
             result = await this.handleLabelMessages(args);
@@ -894,18 +1097,23 @@ export class CommunicationServer {
             break;
           case 'get_message_stats':
             result = await this.handleGetMessageStats(args);
+            this.setCachedResponse(cacheKey, result);
             break;
           case 'get_server_health':
             result = await this.handleGetServerHealth(args);
+            this.setCachedResponse(cacheKey, result);
             break;
           case 'get_unread_count':
             result = await this.handleGetUnreadCount(args);
+            this.setCachedResponse(cacheKey, result);
             break;
           case 'view_conversation_log':
             result = await this.handleViewConversationLog(args);
+            this.setCachedResponse(cacheKey, result);
             break;
           case 'get_conversation_stats':
             result = await this.handleGetConversationStats(args);
+            this.setCachedResponse(cacheKey, result);
             break;
           case 'send_priority_message':
             result = await this.handleSendPriorityMessage(args);
@@ -915,6 +1123,7 @@ export class CommunicationServer {
             break;
           case 'get_message_templates':
             result = await this.handleGetMessageTemplates(args);
+            this.setCachedResponse(cacheKey, result);
             break;
           default:
             throw new Error(`Unknown tool: ${name}`);
@@ -937,179 +1146,95 @@ export class CommunicationServer {
         tools: [
           {
             name: 'create_agent',
-            description: 'Create a new agent with enhanced identification',
+            description: 'Create a new agent with user-assigned ID for inter-agent communication',
             inputSchema: {
               type: 'object',
               properties: {
-                name: { type: 'string', description: 'Agent name' },
-                workspace_path: { type: 'string', description: 'Workspace path' },
-                role: { type: 'string', enum: ['general', 'developer', 'manager', 'analyst', 'tester', 'designer', 'coordinator'] },
-                username: { type: 'string', description: 'Optional username for authentication' },
-                password: { type: 'string', description: 'Optional password for authentication' },
-                description: { type: 'string', description: 'Agent description' },
-                capabilities: { type: 'array', items: { type: 'string' }, description: 'Agent capabilities' },
-                tags: { type: 'array', items: { type: 'string' }, description: 'Agent tags' }
-              },
-              required: ['name']
-            }
-          },
-          {
-            name: 'get_agent_identity',
-            description: 'Get agent identity information for verification',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                agent_id: { type: 'string', description: 'Agent ID' }
-              },
-              required: ['agent_id']
-            }
-          },
-          {
-            name: 'verify_agent_identity',
-            description: 'Verify agent identity using signature',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                agent_id: { type: 'string', description: 'Agent ID' },
-                signature: { type: 'string', description: 'Identity signature' }
-              },
-              required: ['agent_id', 'signature']
-            }
-          },
-          {
-            name: 'authenticate_agent',
-            description: 'Authenticate agent with username and password',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                agent_id: { type: 'string', description: 'Agent ID' },
-                username: { type: 'string', description: 'Username' },
-                password: { type: 'string', description: 'Password' }
-              },
-              required: ['agent_id', 'username', 'password']
-            }
-          },
-          {
-            name: 'delete_agent',
-            description: 'Delete an agent account (only by creator or server admin)',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                agent_id: { type: 'string', description: 'Agent ID to delete' },
-                created_by: { type: 'string', description: 'Agent ID of the creator' }
-              },
-              required: ['agent_id']
-            }
-          },
-          {
-            name: 'bulk_mark_read',
-            description: 'Mark multiple messages as read',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                from_path: { type: 'string', description: 'Agent workspace path' },
-                message_ids: { type: 'array', items: { type: 'string' }, description: 'Message IDs to mark as read' }
-              },
-              required: ['from_path', 'message_ids']
-            }
-          },
-          {
-            name: 'bulk_mark_unread',
-            description: 'Mark multiple messages as unread',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                from_path: { type: 'string', description: 'Agent workspace path' },
-                message_ids: { type: 'array', items: { type: 'string' }, description: 'Message IDs to mark as unread' }
-              },
-              required: ['from_path', 'message_ids']
-            }
-          },
-          {
-            name: 'bulk_update_states',
-            description: 'Update states of multiple messages',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                from_path: { type: 'string', description: 'Agent workspace path' },
-                message_ids: { type: 'array', items: { type: 'string' }, description: 'Message IDs' },
-                new_state: { type: 'string', enum: ['sent', 'arrived', 'replied', 'ignored', 'read', 'unread'], description: 'New state' }
-              },
-              required: ['from_path', 'message_ids', 'new_state']
-            }
-          },
-          {
-            name: 'delete_messages',
-            description: 'Delete multiple messages',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                from_path: { type: 'string', description: 'Agent workspace path' },
-                message_ids: { type: 'array', items: { type: 'string' }, description: 'Message IDs to delete' }
-              },
-              required: ['from_path', 'message_ids']
-            }
-          },
-          {
-            name: 'empty_mailbox',
-            description: 'Empty mailbox with optional query filter',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                from_path: { type: 'string', description: 'Agent workspace path' },
-                query: { type: 'string', description: 'Optional search query to filter messages' }
-              },
-              required: ['from_path']
-            }
-          },
-          {
-            name: 'list_agents',
-            description: 'List all agents in a specific workspace directory.',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                path: {
-                  type: 'string',
-                  description: 'The absolute path to the project directory to list agents from.',
+                agent_id: { 
+                  type: 'string', 
+                  description: 'Unique identifier for the agent (user-assigned, max 100 chars)',
+                  examples: ['test-agent', 'frontend-dev', 'backend-api']
+                },
+                name: { 
+                  type: 'string', 
+                  description: 'Human-readable name for the agent (max 200 chars)',
+                  examples: ['Test Agent', 'Frontend Developer', 'Backend API']
+                },
+                workspace_path: { 
+                  type: 'string', 
+                  description: 'Absolute path to the agent\'s workspace directory',
                   pattern: '^/.*',
-                  examples: ['/home/user/projects/my-app', '/workspace/backend-service', '/opt/projects/data-analysis']
+                  examples: ['/data/communication_server/communication-server', '/home/user/projects/frontend']
+                },
+                role: { 
+                  type: 'string', 
+                  enum: ['general', 'developer', 'manager', 'analyst', 'tester', 'designer', 'coordinator'],
+                  description: 'Role of the agent in the system',
+                  default: 'general'
+                },
+                username: { 
+                  type: 'string', 
+                  description: 'Username for agent authentication (optional)',
+                  examples: ['test-agent', 'frontend-dev']
+                },
+                password: { 
+                  type: 'string', 
+                  description: 'Password for agent authentication (optional, will be hashed)',
+                  examples: ['secure_password_123']
+                },
+                description: { 
+                  type: 'string', 
+                  description: 'Detailed description of the agent\'s purpose and capabilities (max 1000 chars)',
+                  examples: ['Frontend development agent for React applications']
+                },
+                capabilities: { 
+                  type: 'array', 
+                  items: { type: 'string' }, 
+                  description: 'List of agent capabilities and skills',
+                  examples: [['react', 'typescript', 'ui-design'], ['api-development', 'database']]
+                },
+                tags: { 
+                  type: 'array', 
+                  items: { type: 'string' }, 
+                  description: 'Tags for categorizing and searching agents',
+                  examples: [['frontend', 'react'], ['backend', 'api']]
                 }
               },
-              required: ['path']
+              required: ['agent_id', 'name']
             }
           },
           {
             name: 'send',
-            description: 'Send a message to an agent in the specified directory.',
+            description: 'Send a message to an agent in the specified directory',
             inputSchema: {
               type: 'object',
               properties: {
                 to_path: {
                   type: 'string',
-                  description: 'The absolute path to the target project directory where you want to send the message.',
+                  description: 'Absolute path to the target project directory where you want to send the message',
                   pattern: '^/.*',
-                  examples: ['/home/user/projects/frontend', '/workspace/api-service', '/opt/projects/machine-learning']
+                  examples: ['/data/communication_server/communication-server', '/home/user/projects/frontend']
                 },
                 to_agent: {
                   type: 'string',
-                  description: 'Optional specific agent name to send to. If not provided, sends to the first available agent.',
-                  examples: ['Frontend Agent', 'Backend Agent', 'Database Agent']
+                  description: 'Optional specific agent name to send to. If not provided, sends to the first available agent',
+                  examples: ['Frontend Agent', 'Backend Agent', 'Test Agent']
                 },
                 from_path: {
                   type: 'string',
-                  description: 'Optional absolute path for the sender project. Defaults to current working directory.',
+                  description: 'Optional absolute path for the sender project. Defaults to current working directory',
                   pattern: '^/.*',
-                  examples: ['/home/user/projects/backend']
+                  examples: ['/home/user/projects/backend', '/data/communication_server/communication-server']
                 },
                 title: {
                   type: 'string',
-                  description: 'The subject/title of your message.',
+                  description: 'The subject/title of your message (max 500 chars)',
                   minLength: 1,
                   examples: ['API Integration Request', 'Bug Report', 'Feature Discussion', 'Project Update']
                 },
                 content: {
                   type: 'string',
-                  description: 'The main body of your message.',
+                  description: 'The main body of your message (max 10,000 chars)',
                   minLength: 1,
                   examples: ['Can you help integrate the new API endpoints?', 'I found a bug in the authentication system.', 'The analysis is ready for review.']
                 }
@@ -1118,58 +1243,56 @@ export class CommunicationServer {
             }
           },
           {
-            name: 'reply',
-            description: 'Reply to a message using its message ID.',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                to_message: {
-                  type: 'string',
-                  description: 'The message ID of the message you want to reply to.',
-                  examples: ['abc123-def456-ghi789', 'msg-2025-08-24-001']
-                },
-                from_path: {
-                  type: 'string',
-                  description: 'Optional absolute path for the sender project. Defaults to current working directory.',
-                  pattern: '^/.*',
-                  examples: ['/home/user/projects/backend']
-                },
-                content: {
-                  type: 'string',
-                  description: 'Your reply message content.',
-                  minLength: 1,
-                  examples: ['Thanks for the update!', 'I\'ll look into this issue.', 'The integration is working well now.']
-                }
-              },
-              required: ['to_message', 'content']
-            }
-          },
-          {
             name: 'check_mailbox',
-            description: 'View recent messages in your mailbox (both sent and received).',
+            description: 'Check mailbox for messages with detailed information',
             inputSchema: {
               type: 'object',
               properties: {
                 from_path: {
                   type: 'string',
-                  description: 'Optional absolute path for your project. Defaults to current working directory.',
+                  description: 'Absolute path for the agent\'s workspace to check mailbox',
                   pattern: '^/.*',
-                  examples: ['/home/user/projects/backend']
+                  examples: ['/data/communication_server/communication-server', '/home/user/projects/frontend']
                 },
                 limit: {
-                  type: 'integer',
-                  description: 'Number of recent messages to return (1-500). Default is 50.',
+                  type: 'number',
+                  description: 'Maximum number of messages to return (1-500)',
                   minimum: 1,
                   maximum: 500,
                   default: 50,
                   examples: [10, 50, 100]
                 }
-              }
+              },
+              required: ['from_path']
+            }
+          },
+          {
+            name: 'list_messages',
+            description: 'List recent messages in a simplified format',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                from_path: {
+                  type: 'string',
+                  description: 'Absolute path for the agent\'s workspace to list messages',
+                  pattern: '^/.*',
+                  examples: ['/data/communication_server/communication-server', '/home/user/projects/frontend']
+                },
+                tail: {
+                  type: 'number',
+                  description: 'Number of recent messages to list (1-100)',
+                  minimum: 1,
+                  maximum: 100,
+                  default: 10,
+                  examples: [5, 10, 20]
+                }
+              },
+              required: ['from_path']
             }
           },
           {
             name: 'label_messages',
-            description: 'Change the state of a message (mark as read, unread, ignored, etc.).',
+            description: 'Change the state of a message (mark as read, unread, ignored, etc.)',
             inputSchema: {
               type: 'object',
               properties: {
@@ -1180,54 +1303,31 @@ export class CommunicationServer {
                 },
                 label: {
                   type: 'string',
-                  description: 'New state for the message',
                   enum: ['sent', 'arrived', 'replied', 'ignored', 'read', 'unread'],
+                  description: 'New state for the message',
                   examples: ['read', 'ignored', 'unread']
                 },
                 from_path: {
                   type: 'string',
-                  description: 'Optional absolute path for your project. Defaults to current working directory.',
+                  description: 'Optional absolute path for your project. Defaults to current working directory',
                   pattern: '^/.*',
-                  examples: ['/home/user/projects/backend']
+                  examples: ['/data/communication_server/communication-server']
                 }
               },
               required: ['id', 'label']
             }
           },
           {
-            name: 'list_messages',
-            description: 'Get a simple list of recent messages with just IDs and titles.',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                from_path: {
-                  type: 'string',
-                  description: 'Optional absolute path for your project. Defaults to current working directory.',
-                  pattern: '^/.*',
-                  examples: ['/home/user/projects/backend']
-                },
-                tail: {
-                  type: 'integer',
-                  description: 'Number of recent messages to list (1-100). Default is 10.',
-                  minimum: 1,
-                  maximum: 100,
-                  default: 10,
-                  examples: [5, 10, 20]
-                }
-              }
-            }
-          },
-          {
             name: 'query_messages',
-            description: 'Search through your messages by text content.',
+            description: 'Search through your messages by text content',
             inputSchema: {
               type: 'object',
               properties: {
                 from_path: {
                   type: 'string',
-                  description: 'Optional absolute path for your project. Defaults to current working directory.',
+                  description: 'Optional absolute path for your project. Defaults to current working directory',
                   pattern: '^/.*',
-                  examples: ['/home/user/projects/backend']
+                  examples: ['/data/communication_server/communication-server']
                 },
                 query: {
                   type: 'string',
@@ -1241,7 +1341,7 @@ export class CommunicationServer {
           },
           {
             name: 'get_server_health',
-            description: 'Check the health and performance of the communication server.',
+            description: 'Check the health and performance of the communication server',
             inputSchema: {
               type: 'object',
               properties: {
@@ -1255,7 +1355,7 @@ export class CommunicationServer {
           },
           {
             name: 'get_unread_count',
-            description: 'Get the count of unread messages in your mailbox.',
+            description: 'Get the count of unread messages in your mailbox',
             inputSchema: {
               type: 'object',
               properties: {
@@ -1265,9 +1365,9 @@ export class CommunicationServer {
                 },
                 from_path: {
                   type: 'string',
-                  description: 'Optional absolute path for your project. Defaults to current working directory.',
+                  description: 'Optional absolute path for your project. Defaults to current working directory',
                   pattern: '^/.*',
-                  examples: ['/home/user/projects/backend']
+                  examples: ['/data/communication_server/communication-server']
                 }
               },
               required: ['random_string']
@@ -1275,7 +1375,7 @@ export class CommunicationServer {
           },
           {
             name: 'view_conversation_log',
-            description: 'View the recent conversation log showing organized conversations between agents.',
+            description: 'View the recent conversation log showing organized conversations between agents',
             inputSchema: {
               type: 'object',
               properties: {
@@ -1285,9 +1385,9 @@ export class CommunicationServer {
                 },
                 from_path: {
                   type: 'string',
-                  description: 'Optional absolute path for your project. Defaults to current working directory.',
+                  description: 'Optional absolute path for your project. Defaults to current working directory',
                   pattern: '^/.*',
-                  examples: ['/home/user/projects/backend']
+                  examples: ['/data/communication_server/communication-server']
                 }
               },
               required: ['random_string']
@@ -1295,7 +1395,7 @@ export class CommunicationServer {
           },
           {
             name: 'get_conversation_stats',
-            description: 'Get statistics about conversations and agent communication patterns.',
+            description: 'Get statistics about conversations and agent communication patterns',
             inputSchema: {
               type: 'object',
               properties: {
@@ -1305,77 +1405,289 @@ export class CommunicationServer {
                 },
                 from_path: {
                   type: 'string',
-                  description: 'Optional absolute path for your project. Defaults to current working directory.',
+                  description: 'Optional absolute path for your project. Defaults to current working directory',
                   pattern: '^/.*',
-                  examples: ['/home/user/projects/backend']
+                  examples: ['/data/communication_server/communication-server']
                 }
               },
               required: ['random_string']
             }
           },
           {
-            name: 'get_message_templates',
-            description: 'Get available message templates for common use cases.',
+            name: 'list_agents',
+            description: 'List all agents in a specific workspace directory',
             inputSchema: {
               type: 'object',
               properties: {
-                template_type: {
+                path: {
                   type: 'string',
-                  description: 'Optional specific template type to get.',
-                  enum: ['BUG_REPORT', 'FEATURE_REQUEST', 'API_INTEGRATION', 'CODE_REVIEW', 'DEPLOYMENT', 'TESTING'],
-                  examples: ['BUG_REPORT', 'API_INTEGRATION']
+                  description: 'Absolute path to the workspace directory to list agents from',
+                  pattern: '^/.*',
+                  examples: ['/data/communication_server/communication-server', '/home/user/projects/frontend']
                 }
-              }
+              },
+              required: ['path']
+            }
+          },
+          {
+            name: 'get_agent_identity',
+            description: 'Get detailed information about a specific agent',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                agent_id: {
+                  type: 'string',
+                  description: 'ID of the agent to get information about',
+                  examples: ['test-agent', 'frontend-dev', 'backend-api']
+                }
+              },
+              required: ['agent_id']
+            }
+          },
+          {
+            name: 'verify_agent_identity',
+            description: 'Verify an agent\'s identity using a signature',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                agent_id: {
+                  type: 'string',
+                  description: 'ID of the agent to verify',
+                  examples: ['test-agent', 'frontend-dev']
+                },
+                signature: {
+                  type: 'string',
+                  description: 'Signature to verify the agent\'s identity',
+                  examples: ['signature-hash-123', 'verified-signature-456']
+                }
+              },
+              required: ['agent_id', 'signature']
+            }
+          },
+          {
+            name: 'authenticate_agent',
+            description: 'Authenticate an agent using username and password',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                agent_id: {
+                  type: 'string',
+                  description: 'ID of the agent to authenticate',
+                  examples: ['test-agent', 'frontend-dev']
+                },
+                username: {
+                  type: 'string',
+                  description: 'Username for authentication',
+                  examples: ['test-agent', 'frontend-dev']
+                },
+                password: {
+                  type: 'string',
+                  description: 'Password for authentication',
+                  examples: ['secure_password_123']
+                }
+              },
+              required: ['agent_id', 'username', 'password']
+            }
+          },
+          {
+            name: 'delete_agent',
+            description: 'Delete an agent and all associated data',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                agent_id: {
+                  type: 'string',
+                  description: 'ID of the agent to delete',
+                  examples: ['test-agent', 'frontend-dev']
+                },
+                created_by: {
+                  type: 'string',
+                  description: 'ID of the agent requesting the deletion (must be the creator)',
+                  examples: ['system', 'admin-agent']
+                }
+              },
+              required: ['agent_id', 'created_by']
+            }
+          },
+          {
+            name: 'bulk_mark_read',
+            description: 'Mark multiple messages as read in bulk',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                from_path: {
+                  type: 'string',
+                  description: 'Absolute path for the agent\'s workspace',
+                  pattern: '^/.*',
+                  examples: ['/data/communication_server/communication-server']
+                },
+                message_ids: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Array of message IDs to mark as read',
+                  examples: [['msg-001', 'msg-002', 'msg-003']]
+                }
+              },
+              required: ['from_path', 'message_ids']
+            }
+          },
+          {
+            name: 'bulk_mark_unread',
+            description: 'Mark multiple messages as unread in bulk',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                from_path: {
+                  type: 'string',
+                  description: 'Absolute path for the agent\'s workspace',
+                  pattern: '^/.*',
+                  examples: ['/data/communication_server/communication-server']
+                },
+                message_ids: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Array of message IDs to mark as unread',
+                  examples: [['msg-001', 'msg-002', 'msg-003']]
+                }
+              },
+              required: ['from_path', 'message_ids']
+            }
+          },
+          {
+            name: 'bulk_update_states',
+            description: 'Update the state of multiple messages in bulk',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                from_path: {
+                  type: 'string',
+                  description: 'Absolute path for the agent\'s workspace',
+                  pattern: '^/.*',
+                  examples: ['/data/communication_server/communication-server']
+                },
+                message_ids: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Array of message IDs to update',
+                  examples: [['msg-001', 'msg-002', 'msg-003']]
+                },
+                new_state: {
+                  type: 'string',
+                  enum: ['sent', 'arrived', 'replied', 'ignored', 'read', 'unread'],
+                  description: 'New state to set for all messages',
+                  examples: ['read', 'ignored', 'replied']
+                }
+              },
+              required: ['from_path', 'message_ids', 'new_state']
+            }
+          },
+          {
+            name: 'delete_messages',
+            description: 'Delete multiple messages in bulk',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                from_path: {
+                  type: 'string',
+                  description: 'Absolute path for the agent\'s workspace',
+                  pattern: '^/.*',
+                  examples: ['/data/communication_server/communication-server']
+                },
+                message_ids: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Array of message IDs to delete',
+                  examples: [['msg-001', 'msg-002', 'msg-003']]
+                }
+              },
+              required: ['from_path', 'message_ids']
+            }
+          },
+          {
+            name: 'empty_mailbox',
+            description: 'Delete all messages in the mailbox, optionally filtered by query',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                from_path: {
+                  type: 'string',
+                  description: 'Absolute path for the agent\'s workspace',
+                  pattern: '^/.*',
+                  examples: ['/data/communication_server/communication-server']
+                },
+                query: {
+                  type: 'string',
+                  description: 'Optional query to filter messages before deletion',
+                  examples: ['bug', 'error', 'urgent']
+                }
+              },
+              required: ['from_path']
+            }
+          },
+          {
+            name: 'get_message_stats',
+            description: 'Get statistics about messages in the mailbox',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                from_path: {
+                  type: 'string',
+                  description: 'Absolute path for the agent\'s workspace',
+                  pattern: '^/.*',
+                  examples: ['/data/communication_server/communication-server']
+                }
+              },
+              required: ['from_path']
             }
           },
           {
             name: 'send_priority_message',
-            description: 'Send a message with priority and optional expiration.',
+            description: 'Send a priority message with optional expiration',
             inputSchema: {
               type: 'object',
               properties: {
                 to_path: {
                   type: 'string',
-                  description: 'The absolute path to the target project directory.',
+                  description: 'Absolute path to the target project directory',
                   pattern: '^/.*',
-                  examples: ['/home/user/projects/frontend', '/workspace/api-service']
+                  examples: ['/data/communication_server/communication-server', '/home/user/projects/frontend']
                 },
                 to_agent: {
                   type: 'string',
-                  description: 'Optional specific agent name to send to.',
+                  description: 'Optional specific agent name to send to',
                   examples: ['Frontend Agent', 'Backend Agent']
                 },
                 from_path: {
                   type: 'string',
-                  description: 'Optional absolute path for the sender project.',
+                  description: 'Optional absolute path for the sender project',
                   pattern: '^/.*',
                   examples: ['/home/user/projects/backend']
                 },
                 title: {
                   type: 'string',
-                  description: 'The subject/title of your message.',
+                  description: 'The subject/title of your priority message',
                   minLength: 1,
-                  examples: ['URGENT: System Down', 'High Priority: Security Issue']
+                  examples: ['URGENT: System Down', 'CRITICAL: Security Issue']
                 },
                 content: {
                   type: 'string',
-                  description: 'The main body of your message.',
+                  description: 'The main body of your priority message',
                   minLength: 1,
-                  examples: ['This is an urgent message that requires immediate attention.']
+                  examples: ['The system is experiencing critical issues that require immediate attention.']
                 },
                 priority: {
                   type: 'string',
-                  description: 'Message priority level.',
                   enum: ['low', 'normal', 'high', 'urgent'],
-                  default: 'normal',
+                  description: 'Priority level of the message',
+                  default: 'high',
                   examples: ['high', 'urgent']
                 },
                 expires_in_hours: {
-                  type: 'integer',
-                  description: 'Optional expiration time in hours from now.',
+                  type: 'number',
+                  description: 'Number of hours before the message expires',
                   minimum: 1,
-                  maximum: 8760, // 1 year
-                  examples: [24, 168, 720]
+                  maximum: 168,
+                  examples: [24, 48, 72]
                 }
               },
               required: ['to_path', 'title', 'content']
@@ -1383,7 +1695,7 @@ export class CommunicationServer {
           },
           {
             name: 'cleanup_expired_messages',
-            description: 'Clean up expired messages from the database.',
+            description: 'Clean up expired messages from the database',
             inputSchema: {
               type: 'object',
               properties: {
@@ -1396,16 +1708,16 @@ export class CommunicationServer {
             }
           },
           {
-            name: 'get_message_stats',
-            description: 'Get basic message statistics for the current agent.',
+            name: 'get_message_templates',
+            description: 'Get message templates for common use cases',
             inputSchema: {
               type: 'object',
               properties: {
-                from_path: {
+                template_type: {
                   type: 'string',
-                  description: 'Optional absolute path for your project. Defaults to current working directory.',
-                  pattern: '^/.*',
-                  examples: ['/home/user/projects/backend']
+                  enum: ['BUG_REPORT', 'FEATURE_REQUEST'],
+                  description: 'Type of template to retrieve',
+                  examples: ['BUG_REPORT', 'FEATURE_REQUEST']
                 }
               }
             }

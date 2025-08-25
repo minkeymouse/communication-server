@@ -11,8 +11,14 @@
     "build": "tsc",
     "dev": "tsc && node dist/index.js",
     "start": "node dist/index.js",
-    "test": "echo 'Testing via JSONRPC stdin/stdout' && echo '{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"tools/list\", \"params\": {}}' | node dist/index.js",
-    "test-tool": "echo '{\"jsonrpc\": \"2.0\", \"id\": 2, \"method\": \"tools/call\", \"params\": {\"name\": \"get_server_health\", \"arguments\": {\"random_string\": \"test\"}}}' | node dist/index.js",
+    "start:unique": "NODE_ENV=production MCP_SERVER_ID=comm-server-$(date +%s) node dist/index.js",
+    "kill-all": "pkill -f 'node.*dist/index.js' || true",
+    "restart": "npm run kill-all && sleep 1 && npm run start:unique",
+    "start:clean": "npm run kill-all && sleep 2 && npm run start:unique",
+    "start:clean-db": "./scripts/start-clean.sh",
+    "test": "echo 'Testing via JSONRPC stdin/stdout' && echo '{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"tools/list\", \"params\": {}}' | timeout 10s node dist/index.js",
+    "test-tool": "echo '{\"jsonrpc\": \"2.0\", \"id\": 2, \"method\": \"tools/call\", \"params\": {\"name\": \"get_server_health\", \"arguments\": {\"random_string\": \"test\"}}}' | timeout 10s node dist/index.js",
+    "test-quick": "timeout 5s bash -c 'echo \"{\\\"jsonrpc\\\": \\\"2.0\\\", \\\"id\\\": 1, \\\"method\\\": \\\"tools/call\\\", \\\"params\\\": {\\\"name\\\": \\\"get_server_health\\\", \\\"arguments\\\": {\\\"random_string\\\": \\\"test\\\"}}}' | node dist/index.js'",
     "postinstall": "npm run build"
   },
   "keywords": [
