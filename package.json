@@ -64,5 +64,13 @@
     "capabilities": {
       "tools": true
     }
+  },
+  "smithery": {
+    "deploymentType": "local-only",
+    "cloudDeployment": false,
+    "scanEnabled": false,
+    "localInstallationOnly": true,
+    "installCommand": "npm install communication-server-mcp",
+    "runCommand": "npx communication-server-mcp"
   }
 }
