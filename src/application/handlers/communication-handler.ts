@@ -3,10 +3,9 @@
  * Handles message sending, receiving, and management operations
  */
 
-import { DatabaseManager } from '../../infrastructure/database/database.js';
+import { DatabaseManager } from '../../infrastructure/database/database-manager.js';
 import { MessageQueue } from '../../services/communication/message-queue.js';
-import { ConversationThreadManager } from '../../services/communication/conversation-thread.js';
-import { AgentMonitor } from '../../services/agent-monitor.js';
+import { ConversationThreadManager, AgentMonitor } from '../../services/index.js';
 import { SecurityManager } from '../../infrastructure/security/security.js';
 import { AnalyticsManager } from '../../infrastructure/analytics/analytics.js';
 import { RateLimiter } from '../../infrastructure/analytics/rate-limiter.js';
@@ -121,9 +120,23 @@ export class CommunicationHandler {
       if (!recipientId) {
         throw new Error('Recipient agent ID is required (to_agent_id or to_agent)');
       }
+
+      // Enhanced validation: Check for ghost agents and self-interactions
+      const interactionValidation = this.agentMonitor.validateAgentInteraction(sender.id, recipientId);
+      if (!interactionValidation.isValid) {
+        throw new Error(`Invalid interaction: ${interactionValidation.reason}`);
+      }
+
       const recipient = this.db.getAgent(recipientId);
       if (!recipient) {
         throw new Error(`Recipient agent '${recipientId}' not found`);
+      }
+
+      // Enhanced validation: Check agent identity consistency
+      const senderStatus = this.agentMonitor.getAgentStatus(sender.id);
+      if (senderStatus && senderStatus.roleConsistency && senderStatus.roleConsistency < 0.5) {
+        console.warn(`Agent ${sender.id} showing identity drift (consistency: ${senderStatus.roleConsistency})`);
+        // Continue but log the warning
       }
 
       // Check rate limiting
@@ -132,9 +145,19 @@ export class CommunicationHandler {
         throw new Error(`Rate limit exceeded. Retry after ${Math.ceil((rateLimitCheck.info.retryAfter || 0) / 1000)} seconds`);
       }
 
-      // Record agent activity
+      // Record agent activity with enhanced context
       this.agentMonitor.recordActivity(sender.id);
       this.agentMonitor.recordActivity(recipient.id);
+      
+      // Record conversation context for coherence tracking
+      this.agentMonitor.recordConversationContext(sender.id, {
+        action: 'send_message',
+        recipient: recipientId,
+        subject: title,
+        contentLength: content.length,
+        priority,
+        securityLevel: security_level
+      });
 
       // Generate security keys if needed
       if (security_level === 'signed' || security_level === 'encrypted') {
@@ -169,25 +192,30 @@ export class CommunicationHandler {
         priority as MessagePriority
       );
 
-      // Add to conversation thread
+      // Add to conversation thread with enhanced context tracking
       const threadId = this.threadManager.findOrCreateThread(
-        sender.credentials?.agentId || sender.id,
-        recipient.credentials?.agentId || recipient.id,
+        [sender.credentials?.agentId || sender.id, recipient.credentials?.agentId || recipient.id],
         title,
         priority as 'high' | 'normal' | 'low'
       );
 
-      // Add message to thread
-      this.threadManager.addMessageToThread(threadId, {
+      // Add message to thread with enhanced tracking
+      const threadMessage = {
         messageId: message.id,
         fromAgentId: sender.credentials?.agentId || sender.id,
         toAgentId: recipient.credentials?.agentId || recipient.id,
         content: encryptedContent,
         subject: title,
         timestamp: message.createdAt,
-        state: 'sent',
-        priority: priority as 'high' | 'normal' | 'low'
-      });
+        state: 'sent' as const,
+        priority: priority as 'high' | 'normal' | 'low',
+        threadId: threadId
+      };
+
+      const messageAdded = this.threadManager.addMessageToThread(threadId, threadMessage);
+      if (!messageAdded) {
+        throw new Error('Failed to add message to conversation thread');
+      }
 
       // Enqueue message for delivery
       const queueId = this.messageQueue.enqueue({
@@ -199,7 +227,7 @@ export class CommunicationHandler {
         maxRetries: 3
       });
 
-      // Record analytics
+      // Record analytics with enhanced metrics
       this.analyticsManager.recordMessage(
         message.id,
         sender.credentials?.agentId || sender.id,
@@ -235,7 +263,12 @@ export class CommunicationHandler {
           queueId: queueId,
           executionTime: Date.now() - startTime,
           securityLevel: security_level,
-          encrypted: security_level !== 'none'
+          encrypted: security_level !== 'none',
+          // Enhanced metadata
+          senderIdentityHash: senderStatus?.identityHash,
+          senderRoleConsistency: senderStatus?.roleConsistency,
+          interactionValidation: interactionValidation,
+          threadContextHash: this.threadManager.getThread(threadId)?.contextHash
         }
       });
 
@@ -259,7 +292,13 @@ export class CommunicationHandler {
         queue_id: queueId,
         security_level,
         encrypted: security_level !== 'none',
-        execution_time_ms: executionTime
+        execution_time_ms: executionTime,
+        // Enhanced response data
+        validation: {
+          interaction_valid: interactionValidation.isValid,
+          sender_identity_consistent: senderStatus?.roleConsistency || 1.0,
+          thread_coherence: this.threadManager.getThread(threadId)?.conversationCoherence || 1.0
+        }
       };
     } catch (error: any) {
       const executionTime = Date.now() - startTime;
@@ -312,7 +351,7 @@ export class CommunicationHandler {
     const totalMessages = this.db.getMessageCountForAgent(sender.id);
     const hasMore = totalMessages > limit;
     
-    const result = messages.map(msg => {
+    const result = messages.map((msg: any) => {
       const fromAgent = this.db.getAgent(msg.fromAgent);
       const toAgent = this.db.getAgent(msg.toAgent);
       

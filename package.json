@@ -1,7 +1,7 @@
 {
   "name": "communication-server-mcp",
-  "version": "3.2.0",
-  "description": "Clean, organized email-like messaging for AI agents with 7 essential tools for agent communication and management",
+  "version": "3.3.0",
+  "description": "Clean, organized email-like messaging system for AI agents with 7 essential tools for agent communication and management. Built with TypeScript, Clean Architecture, and MCP Protocol compliance.",
   "main": "dist/index.js",
   "type": "module",
   "bin": {
@@ -30,9 +30,13 @@
     "messaging",
     "ai",
     "protocol",
-    "clean",
-    "organized",
-    "essential-tools"
+    "clean-architecture",
+    "typescript",
+    "modular",
+    "essential-tools",
+    "agent-synchronization",
+    "conversation-threading",
+    "identity-validation"
   ],
   "author": "Communication Server Team <team@communication-server.com>",
   "license": "MIT",
@@ -61,8 +65,8 @@
   "homepage": "https://github.com/communication-server/communication-server-mcp#readme",
   "mcp": {
     "name": "communication-server",
-    "version": "3.2.0",
-    "description": "Clean, organized email-like messaging for AI agents with 7 essential tools for agent communication and management",
+    "version": "3.3.0",
+    "description": "Clean, organized email-like messaging system for AI agents with 7 essential tools for agent communication and management. Built with TypeScript, Clean Architecture, and MCP Protocol compliance.",
     "transport": "stdio",
     "capabilities": {
       "tools": true

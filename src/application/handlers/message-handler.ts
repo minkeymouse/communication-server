@@ -3,7 +3,7 @@
  * Handles bulk message management operations
  */
 
-import { DatabaseManager } from '../../infrastructure/database/database.js';
+import { DatabaseManager } from '../../infrastructure/database/database-manager.js';
 import { MessageState } from '../../domain/agents/models.js';
 
 export class MessageHandler {

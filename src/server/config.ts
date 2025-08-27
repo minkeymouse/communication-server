@@ -23,7 +23,7 @@ export const DEFAULT_CONFIG: ServerConfig = {
   name: 'communication-server',
   version: '2.0.0',
   serverId: process.env.MCP_SERVER_ID || `comm-server-${Date.now()}`,
-  sessionTimeoutMinutes: 30,
+  sessionTimeoutMinutes: 4320, // Extended to 72 hours for local deployment
   maxMessageLength: 10000,
   maxMessagesPerRequest: 500,
       databasePath: process.env.DATABASE_PATH || path.join(os.homedir(), '.communication-server', 'default', 'data', 'communication.db'),

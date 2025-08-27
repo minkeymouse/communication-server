@@ -72,7 +72,7 @@ export const AGENT_CONSTANTS = {
   MAX_CAPABILITIES: 50,
   MAX_TAGS: 20,
   SESSION_MINUTES_MIN: 1,
-  SESSION_MINUTES_MAX: 240
+  SESSION_MINUTES_MAX: 4320 // Extended to 72 hours for local deployment
 } as const;
 
 export const RATE_LIMIT_CONSTANTS = {
@@ -121,7 +121,7 @@ export const HTTP_STATUS_CODES = {
  */
 
 export const SERVER_CONSTANTS = {
-  DEFAULT_SESSION_MINUTES: 30,
+  DEFAULT_SESSION_MINUTES: 4320, // Extended to 72 hours for local deployment
   MAX_MESSAGES_PER_REQUEST: 500,
   MAX_AGENTS_PER_REQUEST: 100,
   DEFAULT_RATE_LIMIT: 100,

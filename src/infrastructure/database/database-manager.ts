@@ -8,6 +8,7 @@ import { DatabaseSchema } from './schema.js';
 import { AgentRepository } from './repositories/agent-repository.js';
 import { MessageRepository } from './repositories/message-repository.js';
 import { SessionRepository } from './repositories/session-repository.js';
+import { MessageLogRepository } from './repositories/message-log-repository.js';
 import { Agent, Message, MessageState } from '../../domain/agents/models.js';
 import { Session } from './repositories/session-repository.js';
 
@@ -17,6 +18,7 @@ export class DatabaseManager {
   private agentRepo: AgentRepository;
   private messageRepo: MessageRepository;
   private sessionRepo: SessionRepository;
+  private messageLogRepo: MessageLogRepository;
 
   constructor(dbPath?: string) {
     this.connection = new DatabaseConnection(dbPath);
@@ -26,6 +28,7 @@ export class DatabaseManager {
     this.agentRepo = new AgentRepository(db);
     this.messageRepo = new MessageRepository(db);
     this.sessionRepo = new SessionRepository(db);
+    this.messageLogRepo = new MessageLogRepository(db);
 
     this.schema.initializeSchema();
   }
@@ -180,6 +183,18 @@ export class DatabaseManager {
     return this.messageRepo.getMessagesRequiringReply(agentId);
   }
 
+  // Message log operations
+  public createMessageLog(messageLog: any): string {
+    return this.messageLogRepo.createMessageLog(messageLog);
+  }
+
+  public emptyMailbox(agentId: string, query?: string): number {
+    // Implementation for emptying mailbox
+    // This would need to be implemented based on the specific requirements
+    // For now, return 0 as placeholder
+    return 0;
+  }
+
   // Session operations
   public createSession(agentId: string, sessionMinutes: number): Session {
     return this.sessionRepo.createSession(agentId, sessionMinutes);
@@ -240,11 +255,10 @@ export class DatabaseManager {
   // Database statistics
   public getDatabaseStats(): any {
     return {
-      activeAgents: this.countAgentsTotal(),
-      totalMessages: this.getTotalMessageCount(),
-      activeSessions: this.getActiveSessionsCount(),
-      totalSessions: this.getTotalSessionsCount(),
-      databasePath: this.connection.getDbPath()
+      total_agents: this.agentRepo.countAgentsTotal(),
+      total_messages: this.messageRepo.getTotalMessageCount(),
+      active_sessions: this.sessionRepo.getActiveSessionsCount(),
+      database_size: 'unknown' // Would need to implement actual size calculation
     };
   }
 

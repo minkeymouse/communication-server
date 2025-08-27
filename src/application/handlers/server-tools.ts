@@ -3,16 +3,16 @@
  * Orchestrates tool operations by delegating to specialized handlers
  */
 
-import { DatabaseManager } from '../../infrastructure/database/database.js';
+import { DatabaseManager } from '../../infrastructure/database/database-manager.js';
 import { MessageQueue } from '../../services/communication/message-queue.js';
-import { ConversationThreadManager } from '../../services/communication/conversation-thread.js';
-import { AgentMonitor } from '../../services/agent-monitor.js';
+import { ConversationThreadManager, AgentMonitor } from '../../services/index.js';
 import { SecurityManager } from '../../infrastructure/security/security.js';
 import { AnalyticsManager } from '../../infrastructure/analytics/analytics.js';
 import { RateLimiter } from '../../infrastructure/analytics/rate-limiter.js';
 import { AgentHandler } from './agent-handler.js';
 import { CommunicationHandler } from './communication-handler.js';
 import { MessageHandler } from './message-handler.js';
+import { TemplateHandler } from './template-handler.js';
 import { SystemHandler } from './system-handler.js';
 
 export class ServerToolsHandler {
@@ -64,8 +64,10 @@ export class ServerToolsHandler {
       case 'system_status':
         return await this.systemHandler.handleSystemStatus(args);
       
-      case 'query_messages':
-        return await this.systemHandler.handleQueryMessages(args);
+      case 'agent_sync_status':
+        return await this.systemHandler.handleAgentSyncStatus(args);
+      
+
       
       default:
         throw new Error(`Unknown tool: ${name}`);

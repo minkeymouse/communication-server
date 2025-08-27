@@ -3,8 +3,8 @@
  * Handles agent creation, authentication, and discovery operations
  */
 
-import { DatabaseManager } from '../../infrastructure/database/database.js';
-import { AgentMonitor } from '../../services/agent-monitor.js';
+import { DatabaseManager } from '../../infrastructure/database/database-manager.js';
+import { AgentMonitor } from '../../services/index.js';
 import { 
   Agent, 
   AgentRole, 

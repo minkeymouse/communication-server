@@ -1,0 +1,146 @@
+{
+  "protocolVersion": "0.3.0",
+  "name": "A2A Protocol Agent",
+  "description": "An A2A-compatible agent that implements the Agent-to-Agent protocol standards for interoperable agent communication. This agent can discover other agents, negotiate interaction modalities, and collaborate on long-running tasks while maintaining protocol compliance.",
+  "url": "https://communication-server.local/a2a/v1",
+  "preferredTransport": "JSONRPC",
+  "additionalInterfaces": [
+    {
+      "url": "https://communication-server.local/a2a/grpc",
+      "transport": "GRPC"
+    },
+    {
+      "url": "https://communication-server.local/a2a/rest",
+      "transport": "HTTP+JSON"
+    }
+  ],
+  "iconUrl": "https://communication-server.local/assets/a2a-logo.svg",
+  "provider": {
+    "organization": "Communication Server Project",
+    "url": "https://github.com/communication-server"
+  },
+  "version": "1.0.0",
+  "documentationUrl": "https://communication-server.local/docs/a2a",
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": true,
+    "stateTransitionHistory": true,
+    "extensions": [
+      {
+        "uri": "https://communication-server.local/extensions/mcp-integration",
+        "description": "MCP (Model Context Protocol) integration for enhanced tool access",
+        "required": false,
+        "params": {
+          "mcpVersion": "1.0.0",
+          "supportedTools": ["file_search", "codebase_search", "web_search"]
+        }
+      }
+    ]
+  },
+  "securitySchemes": {
+    "api-key": {
+      "type": "apiKey",
+      "in": "header",
+      "name": "X-API-Key",
+      "description": "API key authentication for agent access"
+    },
+    "session-token": {
+      "type": "http",
+      "scheme": "Bearer",
+      "bearerFormat": "JWT",
+      "description": "Session-based authentication using JWT tokens"
+    }
+  },
+  "security": [
+    {
+      "api-key": []
+    },
+    {
+      "session-token": []
+    }
+  ],
+  "defaultInputModes": [
+    "text/plain",
+    "application/json",
+    "application/x-www-form-urlencoded"
+  ],
+  "defaultOutputModes": [
+    "text/plain",
+    "application/json",
+    "text/event-stream"
+  ],
+  "skills": [
+    {
+      "id": "agent-discovery",
+      "name": "Agent Discovery",
+      "description": "Discover and interact with other A2A-compatible agents in the network. Supports agent card retrieval and capability negotiation.",
+      "tags": ["discovery", "interoperability", "networking"],
+      "examples": [
+        "Find agents with specific capabilities",
+        "Retrieve agent cards for service discovery",
+        "Negotiate communication protocols"
+      ],
+      "inputModes": ["application/json"],
+      "outputModes": ["application/json"]
+    },
+    {
+      "id": "task-management",
+      "name": "Task Management",
+      "description": "Create, monitor, and manage long-running tasks with state tracking and progress updates.",
+      "tags": ["task-management", "workflow", "state-tracking"],
+      "examples": [
+        "Create a new collaborative task",
+        "Monitor task progress and status",
+        "Cancel or modify ongoing tasks"
+      ],
+      "inputModes": ["application/json"],
+      "outputModes": ["application/json", "text/event-stream"]
+    },
+    {
+      "id": "message-exchange",
+      "name": "Message Exchange",
+      "description": "Send and receive messages with support for rich content types, file attachments, and structured data.",
+      "tags": ["messaging", "communication", "content-exchange"],
+      "examples": [
+        "Send text messages to other agents",
+        "Exchange files and documents",
+        "Share structured data and metadata"
+      ],
+      "inputModes": ["text/plain", "application/json", "multipart/form-data"],
+      "outputModes": ["text/plain", "application/json"]
+    },
+    {
+      "id": "protocol-compliance",
+      "name": "Protocol Compliance",
+      "description": "Ensure compliance with A2A protocol standards including JSON-RPC 2.0, proper error handling, and protocol versioning.",
+      "tags": ["compliance", "standards", "validation"],
+      "examples": [
+        "Validate incoming requests against A2A schema",
+        "Generate compliant error responses",
+        "Handle protocol version negotiation"
+      ],
+      "inputModes": ["application/json"],
+      "outputModes": ["application/json"]
+    },
+    {
+      "id": "streaming-communication",
+      "name": "Streaming Communication",
+      "description": "Support for Server-Sent Events (SSE) for real-time streaming responses and push notifications.",
+      "tags": ["streaming", "real-time", "sse"],
+      "examples": [
+        "Stream task progress updates",
+        "Provide real-time status notifications",
+        "Support long-running operations"
+      ],
+      "inputModes": ["application/json"],
+      "outputModes": ["text/event-stream"]
+    }
+  ],
+  "supportsAuthenticatedExtendedCard": true,
+  "signatures": [
+    {
+      "protected": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9",
+      "signature": "a2a-protocol-agent-signature-placeholder"
+    }
+  ]
+}

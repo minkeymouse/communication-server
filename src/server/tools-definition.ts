@@ -60,7 +60,7 @@ export const TOOLS_DEFINITION = [
       type: 'object',
       properties: {
         agent_id: { type: 'string', description: 'Agent ID to authenticate' },
-        session_minutes: { type: 'number', description: 'Session duration in minutes (auto-expires). Default 30.', default: 30, minimum: 1, maximum: 240 }
+        session_minutes: { type: 'number', description: 'Session duration in minutes (auto-expires). Default 4320 (72 hours).', default: 4320, minimum: 1, maximum: 4320 }
       },
       required: ['agent_id']
     }
@@ -150,6 +150,20 @@ export const TOOLS_DEFINITION = [
         include_analytics: { type: 'boolean', description: 'Include detailed analytics data', default: false },
         include_performance: { type: 'boolean', description: 'Include performance metrics', default: false },
         include_security: { type: 'boolean', description: 'Include security status', default: false }
+      }
+    }
+  },
+  {
+    name: 'agent_sync_status',
+    description: 'Get agent synchronization status and detect identity drift, ghost agents, and conversation issues',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agent_id: { type: 'string', description: 'Specific agent ID to check (optional)' },
+        include_drift_analysis: { type: 'boolean', description: 'Include detailed identity drift analysis', default: true },
+        include_ghost_detection: { type: 'boolean', description: 'Include ghost agent detection results', default: true },
+        include_conversation_health: { type: 'boolean', description: 'Include conversation coherence analysis', default: true },
+        time_range: { type: 'string', enum: ['1h', '24h', '7d'], description: 'Time range for analysis', default: '24h' }
       }
     }
   }

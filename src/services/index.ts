@@ -1,9 +1,8 @@
 /**
- * Services Module Exports
- * Centralized exports for service components
+ * Services Layer
+ * Business logic and orchestration services
  */
 
-export * from './agent-monitor.js';
-export * from './communication/message-queue.js';
-export * from './communication/conversation-thread.js';
+export { AgentMonitor } from './agent-monitor/index.js';
+export { MessageQueue, ConversationThreadManager, ContextManager } from './communication/index.js';
 

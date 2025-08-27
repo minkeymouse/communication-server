@@ -3,7 +3,7 @@
  * Tracks and analyzes system performance metrics
  */
 
-import { DatabaseManager } from '../database/database.js';
+import { DatabaseManager } from '../database/database-manager.js';
 
 export interface PerformanceMetric {
   id: string;
