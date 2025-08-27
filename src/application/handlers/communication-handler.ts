@@ -41,7 +41,7 @@ export class CommunicationHandler {
         return await this.handleSend({ session_token, to_agent_id: to_agent, from_agent_id: from_agent, title, content, priority, security_level });
       
       case 'receive':
-        return await this.handleReceive({ agent_id: from_agent, session_token, limit });
+        return await this.handleReceive({ agent_id: from_agent || args.agent_id, session_token, limit });
       
       case 'reply':
         if (!message_id) throw new Error('message_id is required for reply action');

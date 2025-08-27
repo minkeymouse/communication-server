@@ -78,8 +78,8 @@ export class AgentHandler {
     if (!agent_id) {
       throw new Error('agent_id is required for login');
     }
-    if (session_minutes < 1 || session_minutes > 240) {
-      throw new Error('session_minutes must be between 1 and 240');
+    if (session_minutes < 1 || session_minutes > 4320) {
+      throw new Error('session_minutes must be between 1 and 4320');
     }
 
     const agent = this.db.getAgent(agent_id);

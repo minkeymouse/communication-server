@@ -79,6 +79,7 @@ export const TOOLS_DEFINITION = [
         session_token: { type: 'string', description: 'Session token from login (required for most actions)' },
         to_agent: { type: 'string', description: 'Recipient agent ID (for send/reply actions)' },
         from_agent: { type: 'string', description: 'Sender agent ID (alternative to session_token)' },
+        agent_id: { type: 'string', description: 'Agent ID for the operation (required for receive action)' },
         message_id: { type: 'string', description: 'Message ID (for reply/mark actions)' },
         title: { type: 'string', description: 'Message title/subject (for send/reply actions)' },
         content: { type: 'string', description: 'Message content (for send/reply actions)' },
