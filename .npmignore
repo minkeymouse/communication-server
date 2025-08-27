@@ -21,7 +21,6 @@ __tests__/
 
 # Documentation and config files
 PROGRESS.md
-smithery.yaml
 docker-compose.yml
 Dockerfile
 communication-server.service
