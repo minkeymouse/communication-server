@@ -1,10 +1,10 @@
 {
   "mcpServers": {
-    "communication-server-v2": {
-      "command": "node",
-      "args": ["/data/communication_server/communication-server/dist/index.js"],
+    "communication-server": {
+      "command": "communication-server-mcp",
+      "args": [],
       "env": {
-        "MCP_SERVER_ID": "comm-server-v2",
+        "MCP_SERVER_ID": "comm-server",
         "NODE_ENV": "production"
       }
     }
