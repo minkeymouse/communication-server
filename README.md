@@ -262,6 +262,12 @@ npm run verify        # Verify installation
 
 ## 📋 Changelog
 
+### [3.4.0] - 2024-12-19
+#### 🚀 Session Management Enhancement
+- **Extended Session Duration**: Increased maximum session duration to 72 hours (4320 minutes)
+- **Communication Tool Fixes**: Resolved parameter handling issues for receive action
+- **Enhanced Compatibility**: Added agent_id parameter for better tool integration
+
 ### [3.3.0] - 2024-12-19
 
 #### 🚀 Major Features
